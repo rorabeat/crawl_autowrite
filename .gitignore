@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# 가상환경
+.venv/
+
+# PyInstaller 빌드 산출물
+build/
+dist/
+*.spec
+
+# 작업 산출물(크롤링 결과/생성 이미지) — 개인 데이터+대용량이라 저장소에 포함하지 않음.
+# PostResult/AGENTS.md(스타일 지침 파일)는 파일이라 이 규칙에 걸리지 않고 그대로 추적됨.
+PostResult/*/
+
+# NaverAutoWrite/post/도 같은 성격의 작업 산출물(테스트로 생성된 md·이미지)이라 제외.
+NaverAutoWrite/post/
+
+# shrimp-task-manager MCP 로컬 데이터
+shrimp_data/
+
+# Claude Code 로컬 전용 설정/락 파일(팀 공유용 settings.json은 추적)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# 서브 프로젝트(NaverBlogCrawlingByPlayWright/, NaverAutoWrite/)는 각자 자체 .gitignore로
+# .env·가상환경·크롬 세션 프로필을 이미 제외한다.

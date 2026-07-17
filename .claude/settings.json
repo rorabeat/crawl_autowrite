@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '\"\\n## \" + (now | localtime | strftime(\"%Y-%m-%d %H:%M:%S\")) + \" - 사용자 프롬프트\\n\\n\" + .prompt + \"\\n\"' >> history.md",
+            "shell": "bash",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.transcript_path' | tr -d '\\r' | { read -r tp; summary=$(jq -rs '[.[] | select(.type==\"assistant\")] | last | .message.content[]? | select(.type==\"text\") | .text' \"$tp\" 2>/dev/null | tr '\\n' ' ' | cut -c1-300); printf '\\n**AI 처리 요약:** %s\\n' \"$summary\" >> history.md; }",
+            "shell": "bash",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

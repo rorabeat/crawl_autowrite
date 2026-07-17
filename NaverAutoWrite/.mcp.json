@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+      "shrimp-task-manager": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["C:/gitRepo/worksapce/mcp-shrimp-task-manager/dist/index.js"],
+        "env": {
+          "DATA_DIR": "C:/gitRepo/NaverAutoWrite/shrimp_data",
+          "TEMPLATES_USE": "en",
+          "ENABLE_GUI": "true"
+        }
+      }
+    }
+  }
+  

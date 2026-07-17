@@ -1,0 +1,10 @@
+# 인증 정보 (F010)
+.env
+
+# 로그인 세션 상태 저장 경로 (F002)
+.naver_session/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

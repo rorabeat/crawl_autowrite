@@ -1,0 +1,10 @@
+# 오케스트레이터(app.py) 의존성
+# GUI 프레임워크: docs/PRD.md 7절 "GUI 프레임워크 미확정" 항목에서 PySide6로 결정
+PySide6>=6.11.0
+
+# 테스트
+pytest>=8.0.0
+pytest-qt>=4.5.0
+
+# 참고: NaverBlogCrawlingByPlayWright/, NaverAutoWrite/ 는 각각 독립된 의존성/venv를 가지며
+# 오케스트레이터는 이들을 subprocess로만 호출한다(직접 import하지 않으므로 여기 포함하지 않음).
