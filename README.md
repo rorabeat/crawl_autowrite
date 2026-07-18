@@ -61,17 +61,22 @@ Windows에서 GUI 없이(헤드리스) 테스트를 실행하려면 `QT_QPA_PLAT
 `subprocess_runner.run()`은 `timeout`(초) 인자를 받으므로, 서브프로세스별 타임아웃이
 필요하면 호출부에서 지정한다(현재 파이프라인 함수들은 무제한 대기가 기본값).
 
-## 배포 방식 (예정, 문서화 수준)
-
-실제 패키징/CI 구축은 아직 수행하지 않았다. 향후 방향:
+## 배포 방식 (PyInstaller onefile)
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile app.py
+pyinstaller --onefile --windowed --distpath . --workpath build --specpath build --name app app.py
 ```
 
+`--distpath .`로 exe를 저장소 루트에 바로 생성한다 — `config.py`의 `_WORK_ROOT`가
+(얼어붙은 실행 파일일 때는) exe 자신의 위치를 기준으로 `NaverBlogCrawlingByPlayWright/`,
+`NaverAutoWrite/`, `PostResult/`를 찾으므로, exe가 `dist/` 등 다른 위치에 있으면 이 폴더들을
+찾지 못한다. 빌드된 `app.exe`는 저장소 루트(이 폴더들과 같은 위치)에 그대로 둬야 한다.
+
 `NaverBlogCrawlingByPlayWright/`, `NaverAutoWrite/`는 각각 별도의 완성 프로그램이므로
-오케스트레이터 exe와 별도로 배포/설치되어야 한다(각 폴더의 `.env`, 의존성 포함).
+오케스트레이터 exe에 번들되지 않는다 — exe 옆에 그대로 있어야 하고, 각 폴더의 `.env`와
+파이썬 실행 환경(현재는 오케스트레이터 venv에 두 서브 프로젝트 의존성을 모두 설치해
+`python`으로 실행)이 그대로 필요하다.
 
 ## 관련 문서
 
