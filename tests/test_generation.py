@@ -100,3 +100,54 @@ def test_run_generation_passes_absolute_image_paths_and_writes_md(tmp_path, monk
 
     image_index = captured_args["args"].index("--image")
     assert Path(captured_args["args"][image_index + 1]) == image_file.resolve()
+
+
+def test_resolve_agents_md_content_uses_custom_path_when_set(tmp_path):
+    custom = tmp_path / "custom_agents.md"
+    custom.write_text("커스텀 지침", encoding="utf-8")
+
+    context = pipeline.PipelineContext(keyword="키워드", agents_md_path=str(custom))
+    assert pipeline._resolve_agents_md_content(context) == "커스텀 지침"
+
+
+def test_resolve_agents_md_content_falls_back_when_custom_path_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "기본 지침")
+
+    context = pipeline.PipelineContext(keyword="키워드", agents_md_path=str(tmp_path / "없는파일.md"))
+    assert pipeline._resolve_agents_md_content(context) == "기본 지침"
+
+
+def test_sync_agents_md_writes_inside_work_dir_not_parent(tmp_path):
+    """work_dir.parent에 쓰면 실제 운영에서 PostResult/AGENTS.md 원본을 덮어써 버리므로
+    (태스크별 커스텀 AGENTS.md 선택 기능 도입 이후 위험해짐), work_dir 바로 안에 써야 한다."""
+    work_dir = tmp_path / "PostResult" / "2026-07-18_제목"
+    pipeline._sync_agents_md_for_codex_discovery(work_dir, "동기화된 내용")
+
+    assert (work_dir / "AGENTS.md").read_text(encoding="utf-8") == "동기화된 내용"
+    assert not (tmp_path / "PostResult" / "AGENTS.md").exists()
+
+
+def test_run_generation_with_custom_agents_md_still_detects_generated_md(tmp_path, monkeypatch):
+    """AGENTS.md 동기화 파일 자신이 "새로 생긴 *.md"로 오인되어 실제 생성된 글 대신
+    AGENTS.md 내용이 채택되는 회귀를 막는다(과거 실제로 발생했던 버그)."""
+    custom = tmp_path / "custom_agents.md"
+    custom.write_text("커스텀 지침", encoding="utf-8")
+
+    work_dir = tmp_path / "work"
+
+    def fake_run(args, **kwargs):
+        output_dir = config.output_dir(work_dir)
+        (output_dir / "last_message.txt").write_text("생성된 본문", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    context = pipeline.PipelineContext(
+        keyword="제목", use_crawling=False, agents_md_path=str(custom)
+    )
+
+    status, md_path = pipeline.run_generation(context, work_dir, [])
+
+    assert status == "success"
+    assert md_path.name != "AGENTS.md"
+    assert md_path.read_text(encoding="utf-8") == "생성된 본문"

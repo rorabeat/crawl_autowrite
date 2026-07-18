@@ -29,12 +29,18 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -46,7 +52,7 @@ import agents_editor
 import config
 import pipeline
 from image_input import ImageDropList
-from pipeline import PipelineContext
+from pipeline import PipelineContext, TaskItem
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -190,6 +196,20 @@ class InputTab(QWidget):
         self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 codex exec에 위임)")
         self.generate_images_checkbox.setChecked(False)
 
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(1)
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(False)
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+
+        self.agents_md_path: str | None = None
+        self.agents_md_label = QLabel("AGENTS.md: 기본값(PostResult/AGENTS.md)")
+        self.agents_md_browse_button = QPushButton("찾아보기")
+        self.agents_md_browse_button.clicked.connect(self._on_browse_agents_md)
+        self.agents_md_reset_button = QPushButton("기본값 사용")
+        self.agents_md_reset_button.clicked.connect(self._on_reset_agents_md)
+
         self.comment_edit = QLineEdit()
         self.comment_edit.setPlaceholderText("comment(선택)")
 
@@ -221,10 +241,21 @@ class InputTab(QWidget):
         image_header_row.addStretch()
         image_header_row.addWidget(self.clear_images_button)
 
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(self.agents_md_label, 1)
+        agents_md_row.addWidget(self.agents_md_browse_button)
+        agents_md_row.addWidget(self.agents_md_reset_button)
+
         layout = QVBoxLayout(self)
         layout.addLayout(keyword_row)
         layout.addWidget(self.manual_login_checkbox)
-        layout.addWidget(self.generate_images_checkbox)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(agents_md_row)
         layout.addLayout(reuse_row)
         layout.addWidget(self.reuse_list)
         layout.addWidget(self.comment_edit)
@@ -259,6 +290,19 @@ class InputTab(QWidget):
     def _on_clear_images(self) -> None:
         self.image_drop_list.clear_images()
 
+    def _on_browse_agents_md(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "AGENTS.md 파일 선택", str(config.POST_RESULT_ROOT), "Markdown (*.md)"
+        )
+        if not path:
+            return
+        self.agents_md_path = path
+        self.agents_md_label.setText(f"AGENTS.md: {path}")
+
+    def _on_reset_agents_md(self) -> None:
+        self.agents_md_path = None
+        self.agents_md_label.setText("AGENTS.md: 기본값(PostResult/AGENTS.md)")
+
     def to_pipeline_context(self) -> PipelineContext:
         """현재 입력 탭의 값으로 PipelineContext를 생성한다.
 
@@ -271,7 +315,133 @@ class InputTab(QWidget):
             image_paths=list(self.image_drop_list.image_paths),
             use_crawling=self.use_crawling_checkbox.isChecked(),
             generate_images=self.generate_images_checkbox.isChecked(),
+            image_gen_count=self.image_gen_count_spin.value(),
+            agents_md_path=self.agents_md_path,
             reuse_work_dir=self.selected_reuse_dir,
+            login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
+        )
+
+
+class TaskEditDialog(QDialog):
+    """저장된 태스크(TaskItem) 하나를 새로 만들거나 편집하는 다이얼로그.
+
+    InputTab과 같은 필드 구성(키워드/코멘트/크롤링 사용/AI 이미지 생성/수동 로그인 +
+    이미지 목록)을 쓰되, "즉시 실행"이 아니라 "저장"이 목적이라는 점이 다르다. 태스크는
+    reuse_work_dir(기존 크롤링 데이터 재사용)을 갖지 않는다 — 그 기능은 입력 탭 전용
+    흐름이라 이번 범위에서는 뺐다(태스크로 만든 작업은 항상 새 작업 폴더로 실행됨).
+    """
+
+    def __init__(self, task: TaskItem | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("태스크 편집" if task is not None else "새 태스크")
+        self._task_id = task.task_id if task is not None else pipeline.new_task_id()
+
+        self.label_edit = QLineEdit(task.label if task is not None else "")
+        self.label_edit.setPlaceholderText("태스크 이름(비우면 키워드로 자동 표시)")
+
+        self.keyword_edit = QLineEdit(task.keyword if task is not None else "")
+        self.keyword_edit.setPlaceholderText("키워드")
+
+        self.use_crawling_checkbox = QCheckBox("크롤링 사용")
+        self.use_crawling_checkbox.setChecked(task.use_crawling if task is not None else True)
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 codex exec에 위임)")
+        self.generate_images_checkbox.setChecked(task.generate_images if task is not None else False)
+
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(task.image_gen_count if task is not None else 1)
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+
+        self.agents_md_path: str | None = task.agents_md_path if task is not None else None
+        self.agents_md_label = QLabel(
+            f"AGENTS.md: {self.agents_md_path}" if self.agents_md_path else "AGENTS.md: 기본값(PostResult/AGENTS.md)"
+        )
+        self.agents_md_browse_button = QPushButton("찾아보기")
+        self.agents_md_browse_button.clicked.connect(self._on_browse_agents_md)
+        self.agents_md_reset_button = QPushButton("기본값 사용")
+        self.agents_md_reset_button.clicked.connect(self._on_reset_agents_md)
+
+        self.manual_login_checkbox = QCheckBox("네이버 로그인 수동으로 진행(자동 입력 안 함)")
+        self.manual_login_checkbox.setChecked((task.login_mode == "manual") if task is not None else False)
+
+        self.comment_edit = QLineEdit(task.comment if task is not None else "")
+        self.comment_edit.setPlaceholderText("comment(선택)")
+
+        self.image_drop_list = ImageDropList()
+        if task is not None:
+            self.image_drop_list.load_images(task.image_paths)
+        self.clear_images_button = QPushButton("이미지 초기화")
+        self.clear_images_button.clicked.connect(self.image_drop_list.clear_images)
+
+        image_header_row = QHBoxLayout()
+        image_header_row.addWidget(QLabel("이미지"))
+        image_header_row.addStretch()
+        image_header_row.addWidget(self.clear_images_button)
+
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(self.agents_md_label, 1)
+        agents_md_row.addWidget(self.agents_md_browse_button)
+        agents_md_row.addWidget(self.agents_md_reset_button)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("태스크 이름"))
+        layout.addWidget(self.label_edit)
+        layout.addWidget(QLabel("키워드"))
+        layout.addWidget(self.keyword_edit)
+        layout.addWidget(self.use_crawling_checkbox)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(agents_md_row)
+        layout.addWidget(self.manual_login_checkbox)
+        layout.addWidget(self.comment_edit)
+        layout.addLayout(image_header_row)
+        layout.addWidget(self.image_drop_list)
+        layout.addWidget(button_box)
+        self.resize(480, 520)
+
+    def _on_accept(self) -> None:
+        if not self.keyword_edit.text().strip():
+            QMessageBox.warning(self, "태스크 편집", "키워드를 입력해주세요.")
+            return
+        self.accept()
+
+    def _on_browse_agents_md(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "AGENTS.md 파일 선택", str(config.POST_RESULT_ROOT), "Markdown (*.md)"
+        )
+        if not path:
+            return
+        self.agents_md_path = path
+        self.agents_md_label.setText(f"AGENTS.md: {path}")
+
+    def _on_reset_agents_md(self) -> None:
+        self.agents_md_path = None
+        self.agents_md_label.setText("AGENTS.md: 기본값(PostResult/AGENTS.md)")
+
+    def get_task_item(self) -> TaskItem:
+        keyword = self.keyword_edit.text().strip()
+        label = self.label_edit.text().strip() or keyword
+        return TaskItem(
+            task_id=self._task_id,
+            label=label,
+            keyword=keyword,
+            comment=self.comment_edit.text(),
+            image_paths=list(self.image_drop_list.image_paths),
+            use_crawling=self.use_crawling_checkbox.isChecked(),
+            generate_images=self.generate_images_checkbox.isChecked(),
+            image_gen_count=self.image_gen_count_spin.value(),
+            agents_md_path=self.agents_md_path,
             login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
         )
 
@@ -312,6 +482,56 @@ class AgentsEditorTab(QWidget):
 
     def _on_cancel(self) -> None:
         self.text_edit.setPlainText(self._original_content)
+
+
+class TaskManager(QObject):
+    """저장된 태스크(tasks.json) 목록의 CRUD를 담당한다.
+
+    실행 엔진(JobQueueManager)과는 완전히 별개다 — 태스크는 "대기열에 넣기 전에
+    미리 저장해 둔 정의"일 뿐이고, 실제 실행은 여전히 JobQueueManager.enqueue()가
+    맡는다(MultiTaskTab이 "대기열에 추가" 시 TaskItem.to_pipeline_context()로 변환해
+    넘겨준다). 매 변경(추가/수정/삭제/순서변경)마다 즉시 pipeline.save_tasks()로
+    디스크에 반영하고 changed 시그널을 쏴서 UI가 다시 그리게 한다.
+    """
+
+    changed = Signal()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.tasks: list[TaskItem] = pipeline.load_tasks()
+
+    def add(self, task: TaskItem) -> None:
+        self.tasks.append(task)
+        self._persist()
+
+    def update(self, task_id: str, updated: TaskItem) -> None:
+        for i, t in enumerate(self.tasks):
+            if t.task_id == task_id:
+                self.tasks[i] = updated
+                break
+        self._persist()
+
+    def remove(self, task_id: str) -> None:
+        self.tasks = [t for t in self.tasks if t.task_id != task_id]
+        self._persist()
+
+    def move(self, task_id: str, offset: int) -> None:
+        """선택된 태스크를 목록에서 offset만큼 옮긴다(-1=위로, +1=아래로).
+
+        범위를 벗어나면(맨 위에서 위로, 맨 아래에서 아래로) 조용히 무시한다.
+        """
+        idx = next((i for i, t in enumerate(self.tasks) if t.task_id == task_id), None)
+        if idx is None:
+            return
+        new_idx = idx + offset
+        if not (0 <= new_idx < len(self.tasks)):
+            return
+        self.tasks[idx], self.tasks[new_idx] = self.tasks[new_idx], self.tasks[idx]
+        self._persist()
+
+    def _persist(self) -> None:
+        pipeline.save_tasks(self.tasks)
+        self.changed.emit()
 
 
 class PipelineWorker(QThread):
@@ -378,6 +598,20 @@ class JobQueueManager(QObject):
 
     def pending_jobs(self) -> list[QueuedJob]:
         return list(self._pending)
+
+    def remove_pending(self, job_id: int) -> bool:
+        """대기 중(아직 시작되지 않은) 작업 하나를 대기열에서 지운다.
+
+        이미 진행 중인 작업(current_job)은 대상이 아니다 — 실행 중인 파이프라인을
+        중간에 강제 종료하는 기능은 이번 범위가 아니고, 대기 중인 작업만 취소한다.
+        해당 job_id가 대기열에 없으면(이미 시작됐거나 잘못된 id) False를 반환한다.
+        """
+        for i, job in enumerate(self._pending):
+            if job.job_id == job_id:
+                del self._pending[i]
+                self.changed.emit()
+                return True
+        return False
 
     def _start_next_if_idle(self) -> None:
         if self._current is not None or not self._pending:
@@ -831,39 +1065,157 @@ class RunLogTab(QWidget):
 
 
 class MultiTaskTab(QWidget):
-    """"전체 실행" 요청을 여러 개 넣었을 때 진행 중/대기 중 작업을 보여주는 탭.
+    """저장된 태스크 관리 + "전체 실행" 대기열 상태를 함께 보여주는 탭.
 
-    JobQueueManager가 한 번에 하나의 작업만 실행하고 나머지는 대기열에 쌓아두므로,
-    이 탭은 그 상태(진행 중 작업 최대 1개 + 대기열)를 그대로 반영해서 보여주기만 한다
-    — 새 작업 시작/큐 순서 관리 로직 자체는 여기 없다(JobQueueManager 책임).
+    두 계층이 함께 있다:
+    1. "저장된 태스크"(TaskManager, tasks.json) — 아직 실행되지 않은, 미리 만들어 둔
+       작업 정의. 여기서 생성/편집/삭제/순서변경하고, "대기열에 추가"를 누르면 그
+       시점의 값을 PipelineContext로 변환해 JobQueueManager에 넘긴다.
+    2. "진행 중/대기 중 작업"(JobQueueManager) — 이미 대기열에 들어가 실행 중이거나
+       실행을 기다리는 작업의 상태. JobQueueManager가 한 번에 하나만 실행하고
+       나머지는 FIFO로 대기시키므로, 이 부분은 그 상태를 그대로 반영해서 보여주기만
+       한다(큐 순서 관리 로직 자체는 JobQueueManager 책임).
     """
 
-    def __init__(self, job_queue: JobQueueManager, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, job_queue: JobQueueManager, task_manager: TaskManager, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.job_queue = job_queue
+        self.task_manager = task_manager
+
+        self.task_list = QListWidget()
+        self.new_task_button = QPushButton("새 태스크")
+        self.new_task_button.clicked.connect(self._on_new_task)
+        self.edit_task_button = QPushButton("편집")
+        self.edit_task_button.clicked.connect(self._on_edit_task)
+        self.delete_task_button = QPushButton("삭제")
+        self.delete_task_button.clicked.connect(self._on_delete_task)
+        self.move_up_button = QPushButton("위로")
+        self.move_up_button.clicked.connect(lambda: self._on_move_task(-1))
+        self.move_down_button = QPushButton("아래로")
+        self.move_down_button.clicked.connect(lambda: self._on_move_task(1))
+        self.enqueue_task_button = QPushButton("대기열에 추가")
+        self.enqueue_task_button.clicked.connect(self._on_enqueue_selected)
+        self.enqueue_all_button = QPushButton("전체 대기열에 추가")
+        self.enqueue_all_button.clicked.connect(self._on_enqueue_all)
+
+        task_button_row = QHBoxLayout()
+        for btn in (
+            self.new_task_button,
+            self.edit_task_button,
+            self.delete_task_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.enqueue_task_button,
+            self.enqueue_all_button,
+        ):
+            task_button_row.addWidget(btn)
 
         self.current_list = QListWidget()
         self.current_list.setMaximumHeight(60)
 
         self.pending_list = QListWidget()
+        self.delete_pending_button = QPushButton("선택한 대기 작업 삭제")
+        self.delete_pending_button.clicked.connect(self._on_delete_pending)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("저장된 태스크(디스크에 저장됨, 앱 재시작해도 유지)"))
+        layout.addWidget(self.task_list)
+        layout.addLayout(task_button_row)
         layout.addWidget(QLabel("진행 중 작업"))
         layout.addWidget(self.current_list)
         layout.addWidget(QLabel("대기 중 작업"))
         layout.addWidget(self.pending_list)
+        layout.addWidget(self.delete_pending_button)
         layout.addWidget(QLabel("진행 로그"))
         layout.addWidget(self.log_view)
 
-        self.job_queue.changed.connect(self._refresh)
+        self.task_manager.changed.connect(self._refresh_tasks)
+        self.job_queue.changed.connect(self._refresh_queue)
         self.job_queue.job_step.connect(self._on_job_step)
         self.job_queue.job_done.connect(self._on_job_done)
-        self._refresh()
+        self._refresh_tasks()
+        self._refresh_queue()
 
-    def _refresh(self) -> None:
+    def _refresh_tasks(self) -> None:
+        selected_id = self._selected_task_id()
+        self.task_list.clear()
+        for task in self.task_manager.tasks:
+            settings = []
+            if task.use_crawling:
+                settings.append("크롤링")
+            if task.generate_images:
+                settings.append(f"AI이미지 {task.image_gen_count}장")
+            if task.agents_md_path:
+                settings.append(f"AGENTS.md: {Path(task.agents_md_path).name}")
+            settings_text = "/".join(settings) if settings else "설정없음"
+            item_text = f"{task.label} — 이미지 {len(task.image_paths)}장, {settings_text}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            self.task_list.addItem(item)
+            if task.task_id == selected_id:
+                self.task_list.setCurrentItem(item)
+
+    def _selected_task_id(self) -> str | None:
+        item = self.task_list.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _selected_task(self) -> TaskItem | None:
+        task_id = self._selected_task_id()
+        if task_id is None:
+            return None
+        return next((t for t in self.task_manager.tasks if t.task_id == task_id), None)
+
+    def _on_new_task(self) -> None:
+        dialog = TaskEditDialog(None, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task_manager.add(dialog.get_task_item())
+
+    def _on_edit_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 편집] 먼저 목록에서 태스크를 선택하세요")
+            return
+        dialog = TaskEditDialog(task, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task_manager.update(task.task_id, dialog.get_task_item())
+
+    def _on_delete_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 삭제] 먼저 목록에서 태스크를 선택하세요")
+            return
+        self.task_manager.remove(task.task_id)
+
+    def _on_move_task(self, offset: int) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        self.task_manager.move(task.task_id, offset)
+
+    def _on_enqueue_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[대기열에 추가] 먼저 목록에서 태스크를 선택하세요")
+            return
+        job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+        self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+
+    def _on_enqueue_all(self) -> None:
+        if not self.task_manager.tasks:
+            self.log_view.append("[전체 대기열에 추가] 저장된 태스크가 없습니다")
+            return
+        for task in self.task_manager.tasks:
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+
+    def _refresh_queue(self) -> None:
         self.current_list.clear()
         current = self.job_queue.current_job()
         if current is not None:
@@ -871,7 +1223,20 @@ class MultiTaskTab(QWidget):
 
         self.pending_list.clear()
         for job in self.job_queue.pending_jobs():
-            self.pending_list.addItem(f"작업 #{job.job_id}: {job.label} (대기)")
+            item = QListWidgetItem(f"작업 #{job.job_id}: {job.label} (대기)")
+            item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+            self.pending_list.addItem(item)
+
+    def _on_delete_pending(self) -> None:
+        item = self.pending_list.currentItem()
+        if item is None:
+            self.log_view.append("[대기 작업 삭제] 먼저 목록에서 삭제할 대기 작업을 선택하세요")
+            return
+        job_id = item.data(Qt.ItemDataRole.UserRole)
+        if self.job_queue.remove_pending(job_id):
+            self.log_view.append(f"[대기 작업 삭제] 작업 #{job_id} 대기열에서 삭제됨")
+        else:
+            self.log_view.append(f"[대기 작업 삭제] 작업 #{job_id}을(를) 찾을 수 없습니다(이미 시작됐을 수 있음)")
 
     def _on_job_step(self, job_id: int, name: str, status: str) -> None:
         label = RunLogTab.STEP_LABELS.get(name, name)
@@ -931,11 +1296,12 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(build_app_icon())
 
         self.job_queue = JobQueueManager(self)
+        self.task_manager = TaskManager(self)
 
         self.input_tab = InputTab()
         self.agents_editor_tab = AgentsEditorTab()
         self.run_log_tab = RunLogTab(self.input_tab, self.job_queue)
-        self.multi_task_tab = MultiTaskTab(self.job_queue)
+        self.multi_task_tab = MultiTaskTab(self.job_queue, self.task_manager)
         self.result_tab = ResultTab()
 
         self.tabs = QTabWidget()

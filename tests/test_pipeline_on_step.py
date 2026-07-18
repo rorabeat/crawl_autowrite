@@ -34,6 +34,8 @@ def test_run_pipeline_calls_on_step_running_then_final_for_each_stage(tmp_path, 
     assert calls == [
         ("crawl", "running"),
         ("crawl", "success"),
+        ("image_gen", "running"),
+        ("image_gen", "skipped"),
         ("generate", "running"),
         ("generate", "success"),
         ("publish", "running"),

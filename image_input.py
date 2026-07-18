@@ -64,3 +64,9 @@ class ImageDropList(QListWidget):
         self.image_paths.clear()
         self.clear()
         logger.info("이미지 목록 초기화됨")
+
+    def load_images(self, paths: list[str]) -> None:
+        """저장된 태스크를 편집할 때 기존 이미지 경로 목록을 미리 채운다."""
+        self.clear_images()
+        for p in paths:
+            self._add_image(p)

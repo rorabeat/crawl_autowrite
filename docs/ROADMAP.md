@@ -125,6 +125,30 @@
   - ✅ `subprocess_runner.run()`의 `timeout` 인자 사용법을 README에 문서화(타임아웃 튜닝은 호출부에서 지정하는 기존 인터페이스로 충분, 코드 변경 불필요)
   - ✅ 배포 방식(`PyInstaller --onefile`) 방향을 README에 문서화(실제 패키징 실행/CI 구축은 스코프 밖으로 명시)
 
+### Phase 5: 단독 실행 파일 및 태스크 관리 (사용자 요청) ✅
+
+- **Task 013: PyInstaller 단독 실행 exe 빌드 실제 수행** ✅ - 완료
+  - ✅ `config.py`의 `_WORK_ROOT`가 `sys.frozen`일 때 `Path(__file__)` 대신 `Path(sys.executable).resolve().parent`를 쓰도록 수정(onefile로 묶으면 `__file__`이 매 실행 새로 풀리는 임시 `sys._MEIPASS`를 가리켜, exe 옆의 `NaverBlogCrawlingByPlayWright/`·`NaverAutoWrite/`·`PostResult/`를 못 찾는 문제 방지)
+  - ✅ `pyinstaller --onefile --windowed --distpath . --workpath build --specpath build --name app app.py`로 빌드, exe를 저장소 루트에 직접 생성(NaverBlogCrawlingByPlayWright/NaverAutoWrite/PostResult와 같은 위치에 있어야 `_WORK_ROOT` 기준 경로가 맞음)
+  - ✅ 콘솔 미상속(더블클릭과 동일 조건, PowerShell `Start-Process`로 검증) 상태로 실제 실행해 크래시 없이 5탭 모두 정상 초기화되고 `PostResult/AGENTS.md`를 정확히 찾는 것 확인, 창 제목·응답 상태 정상
+  - ✅ `requirements.txt`/`README.md`에 빌드 명령과 exe 배치 위치 제약(저장소 루트) 문서화
+  - `.gitignore`에 `*.exe`/`build/`/`dist/`/`*.spec` 추가(컴파일 산출물은 저장소에 커밋하지 않음)
+
+- **Task 014: 태스크 저장/관리 기능 구현 (4.8)** ✅ - 완료
+  - ✅ `pipeline.py`: `TaskItem` dataclass(`PipelineContext`와 유사하나 `work_dir`/`reuse_work_dir` 없음), `to_pipeline_context()` 변환 메서드, `load_tasks()`/`save_tasks()`(`.json.tmp` → `os.replace` 원자적 교체) 추가
+  - ✅ `config.py`: `TASKS_JSON_PATH` 경로 상수 추가(`_WORK_ROOT` 기준이라 exe로 빌드해도 exe 옆에 생성됨)
+  - ✅ `image_input.py`: `ImageDropList.load_images()` 추가(태스크 편집 시 기존 이미지 목록 프리필용)
+  - ✅ `app.py`: `TaskManager`(QObject, tasks.json CRUD + `changed` 시그널), `TaskEditDialog`(입력 탭과 동일한 필드 구성의 새 태스크/편집 다이얼로그), `MultiTaskTab`을 태스크 관리자로 확장(태스크 목록·새 태스크/편집/삭제/위로/아래로/대기열에 추가/전체 대기열에 추가) — 기존 `JobQueueManager` 실행 엔진은 변경 없이 재사용(태스크는 `to_pipeline_context()`로 변환해 `enqueue()`에 그대로 전달)
+  - ✅ `tests/test_tasks.py` 신규 작성(5건): `TaskItem`↔JSON 라운드트립(한글 키워드·이미지 경로 리스트 포함), 손상된/누락된 tasks.json 폴백, `TaskItem.to_pipeline_context()` 필드 매핑, `TaskManager.add/update/remove/move`(경계값 포함)와 `changed` 시그널·디스크 반영 확인 — 전체 스위트 57건 전원 통과(기존 42건 + 이번에 추가된 5건 + 이전 세션에서 image_gen 단계 반영 안 됐던 3건 재정합)
+  - GUI 자동화 도구 부재로 실제 마우스 클릭 기반 E2E는 수동 QA로 대체(`docs/MANUAL_QA_CHECKLIST.md`에 태스크 생성→재시작 후 유지→편집/삭제/순서변경→대기열 실행 체크리스트 추가)
+
+- **Task 015: AI 이미지 생성 개수 지정 및 대기 작업 취소 (사용자 요청, 4.8 세부)** ✅ - 완료
+  - ✅ `pipeline.py`: `PipelineContext`/`TaskItem`에 `image_gen_count: int = 1` 추가, `_build_image_generation_prompt`가 "정확히 N장만" 문구로 요청 장수를 명시, `run_image_generation`이 codex가 더 많이 만들어도 먼저 생성된 순서로 요청 장수만 `images/`에 채택(`max(1, count)`로 방어)
+  - ✅ `app.py`: `InputTab`/`TaskEditDialog`에 "AI 실사 이미지 생성" 체크박스 옆 `QSpinBox`(1~10, 기본 1) 추가, 체크박스와 연동해 활성화/비활성화, `to_pipeline_context()`/`get_task_item()`에 반영. `MultiTaskTab` 태스크 목록 요약에 장수 표시("AI이미지 N장")
+  - ✅ `app.py`: `JobQueueManager.remove_pending(job_id)` 추가(대기 중인, 아직 시작 안 된 작업만 취소 가능 — 진행 중 작업은 대상 아님). `MultiTaskTab`에 "선택한 대기 작업 삭제" 버튼 추가
+  - ✅ `tests/test_image_generation.py` 신규 작성(4건), `tests/test_tasks.py`에 2건 추가, `tests/test_job_queue.py`에 `remove_pending` FIFO 취소 시나리오 1건 추가 — 전체 스위트 63건 전원 통과
+  - GUI 헤드리스 스모크 테스트로 스핀박스 활성화 연동·`to_pipeline_context` 값 반영·대기 작업 삭제 배선을 실제 `MainWindow` 구성 후 확인(`pipeline.run_pipeline`을 가짜로 교체해 실제 서브프로세스는 호출하지 않음)
+
 ## 일정 및 마일스톤
 
 - PRD 8절에 명시된 대로 구체적 일정은 **TBD**이며, 위 Phase 순서가 제안 마일스톤(입력 GUI 골격 → AGENTS.md 편집 → 크롤링 연동 → codex exec 연동 → 발행 연동 → PostResult 저장/로그 → 통합 테스트)을 반영합니다.

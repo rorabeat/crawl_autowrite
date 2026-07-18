@@ -12,6 +12,10 @@ __pycache__/
 build/
 dist/
 *.spec
+# exe 자신은 NaverBlogCrawlingByPlayWright/NaverAutoWrite/PostResult와 같은 레벨(루트)에
+# 둬야 config.py의 _WORK_ROOT가 올바르게 잡힌다(dist/ 안에 두면 한 단계 어긋남) — 그래서
+# 빌드 산출물 exe도 루트에 생기며, 컴파일된 바이너리라 커밋 대상이 아니다.
+*.exe
 
 # 작업 산출물(크롤링 결과/생성 이미지) — 개인 데이터+대용량이라 저장소에 포함하지 않음.
 # PostResult/AGENTS.md(스타일 지침 파일)는 파일이라 이 규칙에 걸리지 않고 그대로 추적됨.

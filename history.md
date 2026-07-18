@@ -1253,3 +1253,48 @@ c:\Users\d2njj\Downloads\20260717_192942.png 이미지 생성이 진행중인지
 
 /git:commit
 
+
+**AI 처리 요약:** **푸시 완료:** https://github.com/rorabeat/crawl_autowrite  - `crawl_autowrite/`가 상위 저장소(`C:\gitRepo`)의 `.gitignore`에 완전히 가려져 있어 지금까지 버전관리가 전혀 안 되고 있었습니다. 그래서 이 폴더를 독립 git 저장소로 새로 초기화해�
+
+## 2026-07-17 21:39:54 - 사용자 프롬프트
+
+1번후 2번진행
+
+
+**AI 처리 요약:** **2번(태스크 기능) 구현 완료.** 정리하면:  **구현 내용** - `pipeline.py`: `TaskItem` dataclass + `load_tasks()`/`save_tasks()`(원자적 파일 교체) - `config.py`: `TASKS_JSON_PATH` 경로 상수 - `image_input.py`: `ImageDropList.load_images()` (편집 시 기존 이미지
+
+## 2026-07-17 22:10:38 - 사용자 프롬프트
+
+작업 1번이 완료되면 그 다음 작업이 자동으로 수행되도록 구현되어 있는지 확인해줘
+
+
+**AI 처리 요약:** **네, 이미 구현되어 있고 테스트로도 확인됩니다.**  `JobQueueManager`(app.py:484)의 동작 방식:  1. `_on_worker_finished()`(app.py:533) — 작업 1이 끝나면(성공/실패 무관) 호출됨. `self._current = None`으로 비운 뒤, 마지막 줄에서 `self._start_next_
+
+## 2026-07-17 22:12:19 - 사용자 프롬프트
+
+작업1 끝나고 전체 실행 버튼 안누르면 시작안하던데
+
+
+## 2026-07-17 22:13:13 - 사용자 프롬프트
+
+대기열에 반드시 넣어야 되는건가
+
+
+## 2026-07-17 22:17:59 - 사용자 프롬프트
+
+태스크 별로 ai 로 이미지 생성 갯수 지정할수있도록 해줘
+
+
+**AI 처리 요약:** **두 가지 다 완료했습니다.**  **1. 태스크별 AI 이미지 생성 개수 지정** - 입력 탭/태스크 편집 다이얼로그의 "AI 실사 이미지 생성" 체크박스 옆에 개수 스핀박스(1~10장, 기본 1장) 추가 - `codex exec` 프롬프트가 "정확히 N장만" 생�
+
+## 2026-07-18 06:51:50 - 사용자 프롬프트
+
+task에서 agents.md 파일도 선택할수 있게 해줘 그리고 codex exec 할때 해당 agent가 전달되도록 프롬프트를 가변하게 해줘
+
+
+**AI 처리 요약:** **완료 및 실제 codex exec로 검증됨.**  **구현 내용** - `pipeline.py`: `PipelineContext`/`TaskItem`에 `agents_md_path: str | None = None` 추가. `_resolve_agents_md_content(context)`가 지정된 파일이 있으면 그 내용을, 없으면(또는 파일이 사라졌으면 경고 �
+
+## 2026-07-18 15:20:32 - 사용자 프롬프트
+
+/git:commit
+

@@ -3,7 +3,7 @@
 
 import threading
 
-from app import JobQueueManager, MultiTaskTab
+from app import JobQueueManager, MultiTaskTab, TaskManager
 from pipeline import PipelineContext
 
 
@@ -48,8 +48,47 @@ def test_second_job_waits_until_first_finishes(qtbot, monkeypatch):
     assert queue.pending_jobs() == []
 
 
-def test_multi_task_tab_reflects_queue_state(qtbot, monkeypatch):
+def test_remove_pending_cancels_queued_job_before_it_starts(qtbot, monkeypatch):
     import pipeline
+
+    release_first = threading.Event()
+    started_order: list[str] = []
+
+    def fake_run_pipeline(context, on_step=None):
+        started_order.append(context.keyword)
+        if context.keyword == "첫번째":
+            release_first.wait(timeout=3)
+        return {"keyword": context.keyword, "steps": {}}
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+
+    queue = JobQueueManager()
+
+    job1 = queue.enqueue(PipelineContext(keyword="첫번째"), "첫번째")
+    qtbot.waitUntil(lambda: started_order == ["첫번째"], timeout=2000)
+
+    job2 = queue.enqueue(PipelineContext(keyword="두번째"), "두번째")
+    job3 = queue.enqueue(PipelineContext(keyword="세번째"), "세번째")
+    assert [j.job_id for j in queue.pending_jobs()] == [job2.job_id, job3.job_id]
+
+    removed = queue.remove_pending(job2.job_id)
+    assert removed is True
+    assert [j.job_id for j in queue.pending_jobs()] == [job3.job_id]
+
+    # 이미 시작된(진행 중인) 작업이나 존재하지 않는 id는 취소되지 않는다.
+    assert queue.remove_pending(job1.job_id) is False
+    assert queue.remove_pending(99999) is False
+
+    release_first.set()
+    qtbot.waitUntil(lambda: started_order == ["첫번째", "세번째"], timeout=3000)
+    assert "두번째" not in started_order
+
+
+def test_multi_task_tab_reflects_queue_state(qtbot, monkeypatch, tmp_path):
+    import config
+    import pipeline
+
+    monkeypatch.setattr(config, "TASKS_JSON_PATH", tmp_path / "tasks.json")
 
     release = threading.Event()
 
@@ -60,7 +99,8 @@ def test_multi_task_tab_reflects_queue_state(qtbot, monkeypatch):
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
 
     queue = JobQueueManager()
-    tab = MultiTaskTab(queue)
+    task_manager = TaskManager()
+    tab = MultiTaskTab(queue, task_manager)
     qtbot.addWidget(tab)
 
     queue.enqueue(PipelineContext(keyword="진행작업"), "진행작업")

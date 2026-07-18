@@ -11,7 +11,12 @@ def test_pipeline_context_default_instance():
     assert ctx.comment == ""
     assert ctx.image_paths == []
     assert ctx.use_crawling is True
-    assert ctx.step_status == {"crawl": "pending", "generate": "pending", "publish": "pending"}
+    assert ctx.step_status == {
+        "crawl": "pending",
+        "image_gen": "pending",
+        "generate": "pending",
+        "publish": "pending",
+    }
 
 
 def test_crawler_args_match_contract():

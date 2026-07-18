@@ -5,13 +5,14 @@ docs/PRD.md 6절, docs/ROADMAP.md Task 006~009에서 실제 로직을 채운다.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 import json
 import logging
 import re
 import shutil
+import uuid
 
 import agents_editor
 import config
@@ -33,6 +34,8 @@ class PipelineContext:
     image_paths: list[str] = field(default_factory=list)
     use_crawling: bool = True
     generate_images: bool = False
+    image_gen_count: int = 1
+    agents_md_path: str | None = None
     work_dir: Path | None = None
     reuse_work_dir: Path | None = None
     login_mode: str = "auto"
@@ -44,6 +47,75 @@ class PipelineContext:
             "publish": "pending",
         }
     )
+
+
+@dataclass
+class TaskItem:
+    """대기열에 넣기 전에 미리 저장해 두는 작업 정의(디스크에 tasks.json으로 영속화).
+
+    PipelineContext와 필드가 거의 같지만, work_dir/reuse_work_dir처럼 "실행 시점에만
+    정해지거나 입력 탭 전용인 값"은 갖지 않는다 — 아직 실행되지 않은, 저장된 정의이기
+    때문이다. 이미지는 원본 경로 문자열만 저장하고 복사하지 않는다(실제 파일 복사는
+    태스크가 대기열에 들어가 run_pipeline이 실행될 때 기존 로직이 그대로 처리한다).
+    """
+
+    task_id: str
+    label: str
+    keyword: str
+    comment: str = ""
+    image_paths: list[str] = field(default_factory=list)
+    use_crawling: bool = True
+    generate_images: bool = False
+    image_gen_count: int = 1
+    agents_md_path: str | None = None
+    login_mode: str = "auto"
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_pipeline_context(self) -> PipelineContext:
+        return PipelineContext(
+            keyword=self.keyword,
+            comment=self.comment,
+            image_paths=list(self.image_paths),
+            use_crawling=self.use_crawling,
+            generate_images=self.generate_images,
+            image_gen_count=self.image_gen_count,
+            agents_md_path=self.agents_md_path,
+            login_mode=self.login_mode,
+        )
+
+
+def new_task_id() -> str:
+    return uuid.uuid4().hex
+
+
+def load_tasks() -> list[TaskItem]:
+    """tasks.json을 읽어 TaskItem 목록으로 돌려준다.
+
+    파일이 없거나(첫 실행) 손상됐으면 빈 목록을 반환한다 — 태스크 목록은 재생성 가능한
+    편의 데이터이므로, 손상된 파일 하나 때문에 앱 실행 자체를 막지 않는다.
+    """
+    if not config.TASKS_JSON_PATH.exists():
+        return []
+    try:
+        raw = json.loads(config.TASKS_JSON_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("tasks.json 파싱 실패, 빈 목록으로 시작함: %s", config.TASKS_JSON_PATH)
+        return []
+    return [TaskItem(**item) for item in raw]
+
+
+def save_tasks(tasks: list[TaskItem]) -> None:
+    """tasks.json에 저장한다.
+
+    .json.tmp에 먼저 쓰고 os.replace(Path.replace)로 원자적 교체해, 저장 도중 프로세스가
+    죽어도 기존 tasks.json이 반쯤 쓰인 상태로 깨지지 않게 한다.
+    """
+    config.TASKS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config.TASKS_JSON_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps([asdict(t) for t in tasks], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    tmp_path.replace(config.TASKS_JSON_PATH)
 
 
 def run_crawling(context: PipelineContext, work_dir: Path) -> str:
@@ -75,6 +147,23 @@ def run_crawling(context: PipelineContext, work_dir: Path) -> str:
     return "failed" if rc != 0 else "success"
 
 
+def _resolve_agents_md_content(context: PipelineContext) -> str:
+    """작성 지침(페르소나/문체) 내용을 결정한다.
+
+    context.agents_md_path가 지정돼 있으면(태스크별/입력 탭별로 다른 AGENTS.md 파일을
+    선택한 경우) 그 파일을 읽고, 없으면(기본값) PostResult/AGENTS.md를 읽는다. 지정된
+    파일이 삭제/이동돼 더 이상 존재하지 않으면 경고만 남기고 기본 AGENTS.md로 폴백한다
+    (파이프라인 실행 자체를 막지 않는다 — tasks.json에 저장된 경로는 나중에 파일이
+    사라져도 깨지지 않아야 하는 편의 데이터이기 때문).
+    """
+    if context.agents_md_path:
+        custom_path = Path(context.agents_md_path)
+        if custom_path.exists():
+            return agents_editor.load_agents_md(custom_path)
+        logger.warning("지정된 AGENTS.md 파일을 찾을 수 없어 기본값으로 대체함: %s", context.agents_md_path)
+    return agents_editor.load_agents_md()
+
+
 def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path]) -> str:
     """키워드/코멘트/AGENTS.md/크롤링 결과 txt를 결합해 codex exec 프롬프트를 만든다.
 
@@ -86,7 +175,7 @@ def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path
     if context.comment:
         parts.append(f"사용자 코멘트: {context.comment}")
 
-    agents_md = agents_editor.load_agents_md()
+    agents_md = _resolve_agents_md_content(context)
     parts.append(f"작성 지침(AGENTS.md):\n{agents_md}")
 
     if blog_txt_paths:
@@ -101,24 +190,21 @@ def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path
     return "\n\n".join(parts)
 
 
-def _sync_agents_md_for_codex_discovery(work_dir: Path) -> None:
-    """codex exec가 --cd work_dir 기준으로 상위 디렉터리까지 자동으로 읽어들이는
-    AGENTS.md(work_dir.parent/AGENTS.md)를 PostResult/AGENTS.md(오케스트레이터가 관리하는
-    유일한 원본) 내용으로 덮어써 동기화한다.
+def _sync_agents_md_for_codex_discovery(work_dir: Path, content: str) -> None:
+    """codex exec가 --cd work_dir 실행 시 자동으로 읽어들이는 AGENTS.md를
+    work_dir/AGENTS.md에 써 둔다(work_dir 바로 그 자리 — 상위 폴더가 아니다).
 
-    work_dir이 POST_RESULT_ROOT(=PostResult) 바로 아래에 생성되므로 실제 운영에서는
-    work_dir.parent가 곧 PostResult 자신이고, 따라서 원본을 그대로 자기 자신에게
-    다시 쓰는 것과 같아 항상 안전하다(테스트에서는 tmp_path 기반 work_dir을 넘기므로
-    tmp_path 안에서만 쓰기가 일어난다 — 전역 상수 경로를 그대로 쓰면 테스트가 실제
-    프로젝트 파일을 덮어쓰는 사고가 난다).
-
-    사람이 두 파일을 각각 수정하면 프롬프트에 주입되는 지침과 codex가 자동으로 읽는
-    지침이 어긋날 수 있으므로(예: 한쪽만 고쳐서 html 생성 지시가 되살아나는 문제),
-    codex exec 실행 직전마다 항상 동기화해 PostResult/AGENTS.md를 유일한 원본으로 유지한다.
+    예전에는 work_dir.parent(실제 운영에서는 PostResult 자신과 항상 같은 경로)에 썼다.
+    그때는 태스크마다 다른 AGENTS.md를 고를 수 없어 "원본을 자기 자신에게 다시 쓰는"
+    안전한 자기 동기화였지만, 태스크별 커스텀 AGENTS.md 선택 기능이 생기면서 그 방식은
+    사용자가 관리하는 PostResult/AGENTS.md 원본을 다른 태스크의 페르소나 내용으로
+    덮어써 버리는 위험한 부작용이 생긴다. work_dir은 실행마다 새로 만들어지는 전용
+    폴더이므로 여기에 쓰는 것은 항상 안전하고, codex가 --cd로 지정한 cwd 자리이므로
+    자동 발견도 그대로 된다.
     """
-    sync_path = work_dir.parent / "AGENTS.md"
+    sync_path = work_dir / "AGENTS.md"
     sync_path.parent.mkdir(parents=True, exist_ok=True)
-    sync_path.write_text(agents_editor.load_agents_md(), encoding="utf-8")
+    sync_path.write_text(content, encoding="utf-8")
 
 
 _IMAGE_PROMPT_REFERENCE_MAX_CHARS = 300
@@ -135,16 +221,17 @@ def _build_image_generation_prompt(context: PipelineContext, blog_txt_paths: lis
     """
     reference = ""
     if blog_txt_paths:
-        blog_text = " ".join(p.read_text(encoding="utf-8").split())
+        blog_text = " ".join(word for p in blog_txt_paths for word in p.read_text(encoding="utf-8").split())
         reference = blog_text[:_IMAGE_PROMPT_REFERENCE_MAX_CHARS]
 
     comment_part = f" 코멘트: {context.comment}." if context.comment else ""
     reference_part = f" 참고: {reference}" if reference else ""
 
+    count = max(1, context.image_gen_count)
     prompt = (
         f"$imagegen 키워드 '{context.keyword}'.{comment_part} 이 블로그 글에 어울리는 "
-        f"사진처럼 사실적인(실사) 정사각형(1:1) 비율 이미지를 딱 1장만 생성해서 반드시 "
-        f'"images" 폴더(현재 작업 디렉터리 바로 아래)에 저장해줘.{reference_part}'
+        f"사진처럼 사실적인(실사) 정사각형(1:1) 비율 이미지를 정확히 {count}장만 생성해서 "
+        f'반드시 "images" 폴더(현재 작업 디렉터리 바로 아래)에 저장해줘.{reference_part}'
     )
     return " ".join(prompt.split())
 
@@ -178,7 +265,7 @@ def run_image_generation(
     for pattern in image_extensions:
         before_images |= set(work_dir.rglob(pattern))
 
-    _sync_agents_md_for_codex_discovery(work_dir)
+    _sync_agents_md_for_codex_discovery(work_dir, _resolve_agents_md_content(context))
 
     prompt = _build_image_generation_prompt(context, blog_txt_paths)
     args = config.build_codex_exec_args([], work_dir, last_message_path)
@@ -189,9 +276,10 @@ def run_image_generation(
         after_images |= set(work_dir.rglob(pattern))
     new_images = sorted(after_images - before_images, key=lambda p: p.stat().st_mtime)
 
-    # 프롬프트로 1장만 요청해도 codex가 여러 장 생성하는 경우를 대비해, 가장 먼저
-    # 생성된 1장만 채택하고 나머지는 images/로 옮기지 않는다(원본 위치에 남는다).
-    new_images = new_images[:1]
+    # 프롬프트로 요청한 장수(context.image_gen_count)보다 codex가 더 많이 생성하는 경우를
+    # 대비해, 가장 먼저 생성된 순서로 요청한 장수만큼만 채택하고 나머지는 images/로
+    # 옮기지 않는다(원본 위치에 남는다).
+    new_images = new_images[: max(1, context.image_gen_count)]
 
     result_paths: list[Path] = []
     for f in new_images:
@@ -227,9 +315,12 @@ def run_generation(
     output_dir_path = config.output_dir(work_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     last_message_path = output_dir_path / "last_message.txt"
-    before_md_files = set(work_dir.rglob("*.md"))
 
-    _sync_agents_md_for_codex_discovery(work_dir)
+    # AGENTS.md 동기화(work_dir/AGENTS.md에 씀)는 반드시 "이전 산출물 스냅샷"보다 먼저
+    # 해야 한다 — 스냅샷 이후에 동기화하면 방금 만든 AGENTS.md 자신이 "새로 생긴 *.md"로
+    # 오인되어 실제 생성된 글 대신 AGENTS.md 내용이 md_path로 채택되는 버그가 생긴다.
+    _sync_agents_md_for_codex_discovery(work_dir, _resolve_agents_md_content(context))
+    before_md_files = set(work_dir.rglob("*.md"))
 
     args = config.build_codex_exec_args(abs_images, work_dir, last_message_path)
     rc = subprocess_runner.run(args, input_text=prompt)

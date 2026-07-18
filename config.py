@@ -205,6 +205,10 @@ POST_RESULT_ROOT = _WORK_ROOT / "PostResult"
 
 AGENTS_MD_PATH = POST_RESULT_ROOT / "AGENTS.md"
 
+# 저장된 태스크(대기열에 넣기 전 미리 만들어 둔 작업 정의) 영속화 경로. _WORK_ROOT 기준이라
+# exe로 빌드해도 exe 옆에 생긴다(사용자별 로컬 데이터라 저장소에 커밋하지 않음).
+TASKS_JSON_PATH = _WORK_ROOT / "tasks.json"
+
 _WORK_DIR_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_(?P<title>.+?)(?:_\d+)?$")
 
 
