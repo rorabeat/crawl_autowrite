@@ -6,10 +6,14 @@ from PySide6.QtCore import QMimeData, QPoint, QUrl
 from PySide6.QtGui import QDropEvent
 from PySide6.QtCore import Qt
 
+import config
+import pipeline
 from app import InputTab
 
 
-def test_input_tab_default_state_builds_pipeline_context(qtbot):
+def test_input_tab_default_state_builds_pipeline_context(tmp_path, monkeypatch, qtbot):
+    monkeypatch.setattr(config, "INPUT_DEFAULTS_JSON_PATH", tmp_path / "input_defaults.json")
+
     tab = InputTab()
     qtbot.addWidget(tab)
 
@@ -21,6 +25,21 @@ def test_input_tab_default_state_builds_pipeline_context(qtbot):
     assert context.comment == ""
     assert context.image_paths == []
     assert context.use_crawling is True
+    assert context.ai_model == config.AI_MODEL_DEFAULT
+
+
+def test_input_tab_ai_model_combo_selection_persists_and_maps_to_context(tmp_path, monkeypatch, qtbot):
+    monkeypatch.setattr(config, "INPUT_DEFAULTS_JSON_PATH", tmp_path / "input_defaults.json")
+
+    tab = InputTab()
+    qtbot.addWidget(tab)
+
+    idx = tab.ai_model_combo.findData("claude:sonnet")
+    assert idx >= 0
+    tab.ai_model_combo.setCurrentIndex(idx)
+
+    assert tab.to_pipeline_context().ai_model == "claude:sonnet"
+    assert pipeline.load_input_defaults().ai_model == "claude:sonnet"
 
 
 def test_input_tab_reflects_edited_values(qtbot):
@@ -28,7 +47,7 @@ def test_input_tab_reflects_edited_values(qtbot):
     qtbot.addWidget(tab)
 
     tab.keyword_edit.setText("오키나와 여행")
-    tab.comment_edit.setText("아이 동반 가능한 곳 위주로")
+    tab.comment_edit.setPlainText("아이 동반 가능한 곳 위주로")
     tab.use_crawling_checkbox.setChecked(False)
 
     context = tab.to_pipeline_context()

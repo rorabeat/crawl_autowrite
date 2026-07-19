@@ -46,3 +46,37 @@ def test_run_nonzero_exit_code_is_propagated(tmp_path):
     rc = subprocess_runner.run([sys.executable, str(script)])
 
     assert rc == 3
+
+
+def test_run_writes_tee_path_with_all_stdout_lines(tmp_path):
+    script = tmp_path / "two_lines.py"
+    script.write_text("print('a')\nprint('b')\n", encoding="utf-8")
+    tee_path = tmp_path / "tee.txt"
+
+    rc = subprocess_runner.run([sys.executable, str(script)], tee_path=tee_path)
+
+    assert rc == 0
+    content = tee_path.read_text(encoding="utf-8")
+    assert content.splitlines() == ["a", "b"]
+
+
+def test_run_tee_path_written_even_on_nonzero_exit(tmp_path):
+    script = tmp_path / "fail_with_output.py"
+    script.write_text("import sys\nprint('partial')\nsys.exit(1)\n", encoding="utf-8")
+    tee_path = tmp_path / "tee.txt"
+
+    rc = subprocess_runner.run([sys.executable, str(script)], tee_path=tee_path)
+
+    assert rc == 1
+    assert "partial" in tee_path.read_text(encoding="utf-8")
+
+
+def test_run_tee_path_created_in_nonexistent_parent_dir(tmp_path):
+    script = tmp_path / "one_line.py"
+    script.write_text("print('x')\n", encoding="utf-8")
+    tee_path = tmp_path / "nested" / "dir" / "tee.txt"
+
+    rc = subprocess_runner.run([sys.executable, str(script)], tee_path=tee_path)
+
+    assert rc == 0
+    assert tee_path.read_text(encoding="utf-8").strip() == "x"

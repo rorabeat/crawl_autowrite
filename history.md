@@ -1305,3 +1305,221 @@ task에서 agents.md 파일도 선택할수 있게 해줘 그리고 codex exec �
 
 /git:commit 까지 진행해줘
 
+
+**AI 처리 요약:** origin/main에 3개 커밋 모두 푸시 완료했습니다 (`8e787f5..9d8e5f1`). 
+
+## 2026-07-18 15:24:54 - 사용자 프롬프트
+
+그렇게 만들면 이미지 퀄리티가 더 좋아질까?
+
+
+**AI 처리 요약:** 퀄리티(해상도/사실성) 자체보다는 **내용 정합성**이 좋아지는 거예요 — 지금은 크롤링 참고문 300자 스니펫만 보고 이미지를 만들지만, 완성된 글 전체를 참고하면 실제 본문에서 다루는 구체적 장소·상황·디테일을 반영한 �
+
+## 2026-07-18 15:25:13 - 사용자 프롬프트
+
+그럼 그렇게 수정해줘
+
+
+**AI 처리 요약:** 이미지 생성을 글 작성 이후로 옮기고, codex가 이미지 생성과 동시에 그 이미지를 글에 직접 삽입하도록 구현했습니다.  **변경 내용** - `pipeline.py`: `run_pipeline` 순서를 크롤링 → **AI 생성** → **이미지 생성** → 발행으로 변경. 
+
+## 2026-07-18 15:44:12 - 사용자 프롬프트
+
+이미지 디폴트 값을 저장해서 다음 실행할때 같은 같으로 표시하게 해줘
+
+
+**AI 처리 요약:** 두 가지 작업 모두 완료했습니다.  **1. 이미지 생성 개수/사용여부/AGENTS.md 경로 기본값 저장** (`config.py`, `pipeline.py`, `app.py`) - `config.INPUT_DEFAULTS_JSON_PATH`(`input_defaults.json`) 추가, `.gitignore`에 반영 - `pipeline.InputDefaults` 데이터클래�
+
+## 2026-07-18 18:51:08 - 사용자 프롬프트
+
+37 I 첫 이미지는 부나켄의 산호 절벽과 거북이를 중심으로 잡았습니다. 나머지는 항공·입국 준비, 다이빙 하루 일정, 해안 리조트 동선이 서로 겹치지 않도록 구성하고 있습니다.
+18:49:00 I ␛[2m2026-07-18T09:49:00.841382Z␛[0m ␛[31mERROR␛[0m ␛[2mcodex_models_manager::manager␛[0m␛[2m:␛[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 88 column 5
+18:49:13 I ␛[2m2026-07-18T09:49:13.440861Z␛[0m ␛[31mERROR␛[0m ␛[2mcodex_models_manager::manager␛[0m␛[2m:␛[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 88 column 5
+18:49:28 I ␛[2m2026-07-18T09:49:28.100739Z␛[0m ␛[31mERROR␛[0m ␛[2mcodex_models_manager::manager␛[0m␛[2m:␛[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 88 column 5
+
+
+**AI 처리 요약:** 터미널 로그 일부가 붙여넣기된 것으로 보이는데, 정확히 어떤 작업을 원하시는지 명확하지 않습니다.  - `codex_models_manager`의 `failed to renew cache TTL: missing field 'supports_reasoning_summaries'` 에러를 조사/해결하길 원하시나요? (참고로 
+
+## 2026-07-18 18:52:13 - 사용자 프롬프트
+
+이 프로젝트에서 개선할 내용이 있는지 확인해줘
+
+
+**AI 처리 요약:** 현재 커밋되지 않은 변경사항(Task 016 완료분: 이미지 생성 순서 재배치 + 웹 검색 지시 추가 + 입력값 기억 기능)을 확인했습니다. 전체 코드 검토 결과:  **전반적으로 상태 양호** - pytest 78개 전원 통과, `pipeline.py`/`app.py`/`config.p
+
+## 2026-07-18 19:00:33 - 사용자 프롬프트
+
+:29 I .\blog\인도네시아 여행, 마나도 다이빙 숙소 추천! 그랜드룰리마나도 리조트 솔직 후기_20260718_185316.txt
+18:55:29 I 
+18:55:29 I 
+18:58:07 I 2026-07-18T09:58:07.482775Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 88 column 5 이미지 생성이 안되고 있어 업 #1] AI 생성: running
+[작업 #1] AI 생성: success
+[작업 #1] 이미지 생성: running  ==== 계속 홀딩이야 글 작성시 이미지가 없는 경우  이미지 생성까지 요청을 동시에 해줘
+
+
+**AI 처리 요약:** 81개 테스트 전원 통과합니다. 변경 요약입니다.  **한 것** - `pipeline._build_generation_prompt`: `generate_images` 켜져 있으면 이미지 생성 지시(`$imagegen`, images/ 폴더 저장, 본문 내 `![]()` 직접 포함)를 같은 프롬프트에 포함 - `pipeline.run_ge
+
+## 2026-07-18 20:23:24 - 사용자 프롬프트
+
+한 미친(p) 확장성을 자랑하는 게임이다. 그러므로 추천!
+20:22:10 I 
+20:22:10 I 그리고 99나이츠도 하고싶은데 같이할 사람이 없음. 당근에서 99나이츠 물건파는 사람 봤는데 쩔해달라 하고싶었음... ㅠㅠ 에 아무튼... 로블록스 재밌다.
+20:22:10 I 
+20:22:10 I 구름씨, 북페어때문에 몇달 고생하고 처음 맞는 주말 휴일. 같이 메챠 카멜레온 할까했는데 아이패드로도 가능한 로블록스를 같이 하기로 함.​1. Anomales 공포게임 (무서운 샤와르마 키오스크 변칙성 공포) 👍👍요즘 밤으깡님이랑 햄토리 영상 보는데 이 게임 넘 궁금해서 해봄... 직접 해보니까 덜 무섭긴 한데(음,..... 로블록스 게임 전체적으로 UI가 다소 난잡하게 느껴져서 조작법 익히느라 처음에 좀 헤맸음. 설명따위 해주지 않음. 요즘 젠지세대들은 알아서 하겠지만 난 M세대라... 아무튼... )재밌게 하... (생략, 총 330자)
+20:22:10 I warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+20:22:17 I ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}}
+20:22:17 I ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}}
+20:22:18 I run_generation: rc=1, md_path=C:\gitRepo\crawl_autowrite\PostResult\2026-07-18_로블록스 키보드타워 탈출_2\로블록스 키보드타워 탈출.md, status=failed, 생성된 이미지 0장
+20:22:18 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-07-18_로블록스 키보드타워 탈출_2, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'failed'}, 'image_gen': {'status': 'failed'}, 'publish': {'status': 'skipped'}} [대기열에 추가] 로블록스 키보드타워 탈출 (작업 #1)
+[작업 #1] 크롤링: running
+[작업 #1] 크롤링: success
+[작업 #1] AI 생성: running
+[작업 #1] AI 생성: failed
+[작업 #1] 이미지 생성: failed
+[작업 #1] 발행: skipped
+[작업 #1] 실패 해결방법 알려줘
+
+
+**AI 처리 요약:** `model = "gpt-5.6-sol"` → `model = "gpt-5.5"`로 변경했습니다.  부수적으로 확인된 것: 같은 파일에 이미 `web_search = "live"`가 전역 설정돼 있어, 지난번에 짚었던 "웹 검색 지시가 샌드박스에서 실제로 동작하는지"에 대한 우려는 해소됐�
+
+## 2026-07-18 20:27:30 - 사용자 프롬프트
+
+c:\Users\d2njj\Downloads\20260718_202656.png 윈도우 창이 자유자재로 변경할수 있도록 수정해줘 지금은 왼쪽창을 줄이는데 제한이 있어
+
+
+**AI 처리 요약:** 변경 요약입니다.  **한 것** - `app.py`: `MainWindow`의 좌우 스플리터(`self.tabs` | 상세 로그 패널)에서, 왼쪽 탭 영역의 가로 `sizePolicy`를 `Ignored`로 변경 — "멀티 작업" 탭(버튼 7개)·"실행·로그" 탭(버튼 6개)의 버튼 행이 요구하는 너
+
+## 2026-07-18 22:32:51 - 사용자 프롬프트
+
+이미지가 생성되지 않더라도 별도의 프로그램을 만들어서 생성하지 않게 해줘
+로그 출력시에는 codex 에게 명령으로 전달하는 부분은 하이라이트 해서 표시해줘
+로그출력시 한 화면 기준으로 줄바꿈 해줘
+
+
+**AI 처리 요약:** **요청하신 3가지 반영 완료** (82개 테스트 전원 통과)  1. **이미지 생성 실패 시 우회 프로그램 금지** — `pipeline.py`에 `_IMAGE_GENERATION_FALLBACK_BAN` 상수 추가, 글 작성 통합 프롬프트와 독립 재시도 프롬프트 양쪽에 "`$imagegen`이 실�
+
+## 2026-07-18 22:42:34 - 사용자 프롬프트
+
+codex exec 같이 claude cli 로 단일 프롬프트를 처리할수 있는 명령어 알려줘
+
+
+**AI 처리 요약:** `codex exec`와 동일한 역할을 하는 Claude Code CLI 명령은 **`claude -p`**(또는 `--print`)입니다. 대화형 세션을 열지 않고 프롬프트 하나를 처리한 뒤 결과를 출력하고 종료합니다.  ```bash # 기본 사용 claude -p "이 저장소의 pipeline.py 구조�
+
+## 2026-07-18 22:45:28 - 사용자 프롬프트
+
+c:\Users\d2njj\Downloads\20260718_224348.png 에 codex gpt 5.5, 5.6 sol, claude sonnet 을 선택할수 있는 드롭다운 메뉴 추가해주고 한번 설정하면 설정값이 저장되도록 해줘
+
+
+## 2026-07-19 08:10:04 - 사용자 프롬프트
+
+새 태스크에서 입력했을때 ai 를 선택할수 있도록 하는 기능이 구현되었는지 확인해줘 claude cli , codex cli exec  를 이용할껀데 모델을 선택할수 있게 해주고 각 태스크 별로 각각 설정할 수 있게 해줘
+
+
+**AI 처리 요약:** Explore 에이전트를 백그라운드로 실행해서 태스크별 AI/모델 선택 기능 구현 여부를 조사 중입니다. 결과가 오면 바로 정리해서 알려드리겠습니다. 
+
+## 2026-07-19 08:11:14 - 사용자 프롬프트
+
+<task-notification>
+<task-id>abb2397e4fe231cc3</task-id>
+<tool-use-id>toolu_01SEXmC6ziDWtZfevnJpYEQb</tool-use-id>
+<output-file>C:\Users\d2njj\AppData\Local\Temp\claude\C--gitRepo-crawl-autowrite\53631534-7bf0-4ea9-aa7a-3bb419622e2f\tasks\abb2397e4fe231cc3.output</output-file>
+<status>completed</status>
+<summary>Agent "Investigate AI/모델 선택 기능 구현 여부" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Confirmed: no `ai_model` field exists in `PipelineContext`, `TaskItem`, or `InputDefaults` in pipeline.py, despite the comment in config.py claiming it's stored there. This feature is unwired scaffolding only.
+
+## 조사 결과 요약
+
+**결론: UI/태스크별 저장 기능은 구현되어 있지 않음. `config.py`에 인프라만 존재하고 나머지는 미연결(dead code).**
+
+1. **app.py**: "AI 선택"/"모델 선택" 콤보박스나 관련 UI 요소 없음(`grep`로 `ai_model`/`AI_MODEL_CHOICES` 미검출). `TaskEditDialog`(app.py:358), `TaskItem`(pipeline.py:53) 어디에도 ai/model 필드 없음.
+
+2. **pipeline.py**: `run_generation` 등은 `config.build_codex_exec_args`만 호출(379, 455행). `build_claude_exec_args`는 어디서도 호출되지 않음. 백엔드 선택 로직(`claude` vs `codex`) 없음 — 사실상 codex 하드코딩.
+
+3. **subprocess_runner.py**: claude/codex 백엔드 각각을 대비한 주석(52-54행: "claude CLI에는 대응하는 옵션이 없어(사용자 요청으로 추가한 claude 백엔드)")은 있지만, 실제 명령어 구성은 여전히 codex 중심이고 claude 옵션을 조립해 넘기는 실행 경로는 없음.
+
+4. **config.py** (89-110행): 
+```python
+AI_MODEL_CHOICES = [
+    ("Codex · GPT-5.5", "codex:gpt-5.5"),
+    ("Codex · GPT-5.6 Sol", "codex:gpt-5.6-sol"),
+    ("Claude Sonnet", "claude:sonnet"),
+]
+def parse_ai_model(value): ...
+def build_claude_exec_args(model): ...  # 79-86행
+```
+이 상수/함수들은 정의만 되어 있고 app.py/pipeline.py 어디서도 호출/참조되지 않음. 주석(90-93행)은 "InputDefaults/TaskItem/PipelineContext에 저장한다"고 적혀 있으나 실제 해당 클래스들엔 필드가 없음(설계만 되고 구현은 안 됨).
+
+5. **tasks.json**: `ai_model`/`ai_provider` 키 없음(grep 결과 없음).
+
+6. **docs/ROADMAP.md, docs/PRD.md**: "AI 선택"/"모델 선택" UI 기능에 대한 계획 언급 없음. 둘 다 `codex exec`를 유일한 AI 생성 백엔드로 서술(PRD 4.4절, ROADMAP 여러 곳). claude CLI 관련 로드맵 항목도 없음.
+
+**정리**: `config.py`에 codex/claude 멀티 백엔드 선택을 위한 데이터 구조(`AI_MODEL_CHOICES`, `parse_ai_model`, `build_claude_exec_args`)가 준비되어 있으나, GUI 폼 연결, `TaskItem`/`PipelineContext` 필드 추가, `pipeline.py`의 백엔드 분기, tasks.json 저장까지 이어지는 나머지 구현은 없음. 즉 "설계 착수" 단계이며 태스크별 AI/모델 선택 기능은 아직 사용자에게 노출되지 않음.</result>
+<usage><subagent_tokens>34496</subagent_tokens><tool_uses>20</tool_uses><duration_ms>52918</duration_ms></usage>
+</task-notification>
+
+
+## 2026-07-19 08:25:18 - 사용자 프롬프트
+
+list tasks
+
+
+**AI 처리 요약:** 4개의 태스크가 있습니다:  1. **[진행 중]** `subprocess_runner.py`: tee_path 실제 구현 2. **[대기]** `pipeline.py`: ai_model 필드 및 백엔드 분기 추가 3. **[대기]** `app.py`: TaskEditDialog/InputTab에 AI 모델 콤보박스 추가 4. **[대기]** `tests`: 신규/�
+
+## 2026-07-19 08:27:54 - 사용자 프롬프트
+
+수정 계속해줘 끝까지
+
+
+**AI 처리 요약:** 구현이 모두 끝났고 전체 테스트(99개) 통과했습니다.  ## 완료된 작업  **1. `subprocess_runner.py`** — `tee_path` 파라미터가 문서화만 되어 있던 데드코드였는데, 실제로 서브프로세스 출력을 스트리밍 중 파일에 기록하도록 구현(모
+
+## 2026-07-19 09:19:23 - 사용자 프롬프트
+
+자동화에 필요한 핵심 옵션들
+옵션용도-p, --print비대화형 실행, 결과 출력 후 종료--allowedTools "Read,Edit,Bash"도구 자동 승인 (안 걸어두면 승인 대기하다가 멈춤)--permission-mode acceptEdits파일 수정도 자동 승인--permission-mode plan읽기 전용 리뷰용 (수정 안 함)--output-format json구조화된 출력 — total_cost_usd, session_id 등 포함--max-turns 3턴 수 제한 (CI에서 폭주 방지)--barehooks/skills/plugins/MCP 자동탐색 스킵 — 시작 속도↑, CI에서 로컬 설정 안 타게 함--continue / --resume <session_id>이전 세션 이어서 실행
+PR 리뷰 자동화에 맞는 예시
+읽기 전용 리뷰 (수정 없이 diff만 보고 리스크 판단):
+bashclaude -p "이 diff 리뷰하고 리스크를 JSON으로 반환해줘" \
+  --permission-mode plan \
+  --allowedTools "Read,Grep,Glob,Bash(git diff:*)" \
+  --output-format json \
+  --max-turns 3 \
+  --bare
+gh CLI랑 조합해서 쓰던 것처럼, PR diff를 가져와서 파이프로 넘기고 json 결과를 파싱하는 식으로 스크립트 짜면 codex exec랑 거의 동일한 워크플로우가 나와.
+참고할 점
+
+--output-format json 쓰면 결과가 {"type": "result", "total_cost_usd": ..., "result": "...", "session_id": "..."} 형태로 나와서 후처리하기 편함
+CI/무인 환경에서는 --allowedTools 안 걸면 도구 승인 대기하다 멈추니까 반드시 명시할 것
+Docker 컨테이너에서 돌릴 거면 ANTHROPIC_API_KEY 환경변수 넣고 claude --print를 엔트리포인트로 쓰면 됨
+프로그래밍적으로 더 깊게 제어하고 싶으면 Claude Agent SDK(Python/TypeScript)도 있음 — claude -p와 같은 엔진을 라이브러리로 씀
+
+build_agents.py에서 이미 Codex CLI 포맷도 같이 뽑고 있으니, 두 쪽 다 비슷한 헤드리스 실행 패턴으로 맞춰두면 파이프라인 관리가 편해질 것 같아. 반영 여부 확인
+
+
+**AI 처리 요약:** 100개 테스트 전부 통과했습니다. `claude` CLI 헤드리스 실행 옵션을 사용자 결정대로 반영했습니다.  ## 반영 내용 (`config.py:build_claude_exec_args`)  ``` claude -p --model <model> --permission-mode acceptEdits \   --allowedTools "Read,Write,Edit,WebSearch,We
+
+## 2026-07-19 21:51:40 - 사용자 프롬프트
+
+c:\Users\d2njj\Downloads\20260719_214906.png 옵션 관련 내용은 현재 이미지에 표시된값을 디폴트 값으로 동작하게 해줘
+comment 부분은 창 크기를 5줄 정도 표시될수 있게 해주고 자동 줄바꿈이 가능하게 해줘, 태스크 이름을 입력하면 키워드에도 동일하게 반영해줘 키워드를 수정하면 태스크 이름은 수정되지 않게 해줘
+
+
+**AI 처리 요약:** Leaving that as-is since it's unrelated to this task. Summary of what I changed in `app.py` (and matching test updates):  1. **새 태스크(TaskEditDialog) 기본값을 스크린샷 기준으로 변경**: 새 태스크 생성 시 AI 모델 `codex:gpt-5.6-sol`, AI 실사 이미지 생성 체크 `T
+
+## 2026-07-19 21:56:24 - 사용자 프롬프트
+
+다했어?
+
+
+**AI 처리 요약:** 네, 요청하신 세 가지 모두 완료했습니다.  1. **새 태스크 다이얼로그 기본값**: 스크린샷대로 AI 모델 `Codex·GPT-5.6 Sol`, AI 실사 이미지 생성 체크 ON(3장), 네이버 로그인 수동 진행 체크 ON으로 기본 설정. 2. **comment 입력창**: 5줄 �
+
+## 2026-07-19 21:57:17 - 사용자 프롬프트
+
+토큰 다 못썻는데 오늘 할만한거 있나?
+
+
+**AI 처리 요약:** 로드맵상 태스크는 전부 ✅ 완료 상태라 정해진 다음 작업은 없어요. 그래도 지금 상태 기준으로 손볼만한 게 몇 개 보입니다.  1. **아까 발견한 테스트 격리 버그 고치기** — `test_input_tab_default_state_builds_pipeline_context`가 실제 �
+
+## 2026-07-19 21:57:54 - 사용자 프롬프트
+
+다해줘
+

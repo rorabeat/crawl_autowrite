@@ -4,6 +4,7 @@ docs/PRD.md 6절 모듈 구조의 app.py에 해당한다. 5탭(입력/AGENTS.md 
 "입력" 탭은 Task 003에서 InputTab으로 구현했다. 나머지 탭은 이후 Task에서 채운다.
 """
 
+import html
 import json
 import logging
 import shutil
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -149,7 +151,10 @@ class LogPanel(QWidget):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # 이전에는 NoWrap이라 긴 줄(크롤링 원문, codex 프롬프트)마다 가로 스크롤이 생겼다
+        # (사용자 리포트: 화면 밖으로 잘려 보임). WidgetWidth로 바꾸면 패널 너비 기준으로
+        # 자동 줄바꿈된다.
+        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
         self.clear_button = QPushButton("로그 초기화")
         self.clear_button.clicked.connect(self.log_view.clear)
@@ -166,7 +171,16 @@ class LogPanel(QWidget):
         self.log_signal.connect(self.append_line)
 
     def append_line(self, line: str) -> None:
-        self.log_view.append(line)
+        # subprocess_runner.run()이 codex exec에게 stdin으로 넘기는 프롬프트를 "[CODEX 입력]"
+        # 마커를 붙여 로깅하므로(사용자 요청: codex에게 명령으로 전달하는 부분을 하이라이트),
+        # 여기서 그 마커를 찾아 배경색을 입힌다. 모든 줄을 HTML로 렌더링해야(append()의
+        # 자동 rich-text 감지에 맡기지 않고) 일반 로그 줄에 우연히 "<"가 섞여도 태그로
+        # 오인되지 않는다.
+        escaped = html.escape(line)
+        if "[CODEX 입력]" in line:
+            self.log_view.append(f'<span style="background-color:#5a4a00;color:#ffe08a;">{escaped}</span>')
+        else:
+            self.log_view.append(f"<span>{escaped}</span>")
 
 
 class InputTab(QWidget):
@@ -193,25 +207,40 @@ class InputTab(QWidget):
         self.manual_login_checkbox = QCheckBox("네이버 로그인 수동으로 진행(자동 입력 안 함)")
         self.manual_login_checkbox.setChecked(False)
 
-        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 codex exec에 위임)")
-        self.generate_images_checkbox.setChecked(False)
+        input_defaults = pipeline.load_input_defaults()
+
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        idx = self.ai_model_combo.findData(input_defaults.ai_model)
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.ai_model_combo.currentIndexChanged.connect(self._save_input_defaults)
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(input_defaults.generate_images)
+        self.generate_images_checkbox.toggled.connect(self._save_input_defaults)
 
         self.image_gen_count_spin = QSpinBox()
         self.image_gen_count_spin.setRange(1, 10)
-        self.image_gen_count_spin.setValue(1)
+        self.image_gen_count_spin.setValue(input_defaults.image_gen_count)
         self.image_gen_count_spin.setSuffix("장")
-        self.image_gen_count_spin.setEnabled(False)
+        self.image_gen_count_spin.setEnabled(input_defaults.generate_images)
         self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.image_gen_count_spin.valueChanged.connect(self._save_input_defaults)
 
-        self.agents_md_path: str | None = None
-        self.agents_md_label = QLabel("AGENTS.md: 기본값(PostResult/AGENTS.md)")
+        self.agents_md_path: str | None = input_defaults.agents_md_path
+        self.agents_md_label = QLabel(
+            f"AGENTS.md: {self.agents_md_path}" if self.agents_md_path else "AGENTS.md: 기본값(PostResult/AGENTS.md)"
+        )
         self.agents_md_browse_button = QPushButton("찾아보기")
         self.agents_md_browse_button.clicked.connect(self._on_browse_agents_md)
         self.agents_md_reset_button = QPushButton("기본값 사용")
         self.agents_md_reset_button.clicked.connect(self._on_reset_agents_md)
 
-        self.comment_edit = QLineEdit()
+        self.comment_edit = QTextEdit()
         self.comment_edit.setPlaceholderText("comment(선택)")
+        self.comment_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.comment_edit.setFixedHeight(self.comment_edit.fontMetrics().lineSpacing() * 5 + 16)
 
         self.image_drop_list = ImageDropList()
         self.clear_images_button = QPushButton("이미지 초기화")
@@ -241,6 +270,11 @@ class InputTab(QWidget):
         image_header_row.addStretch()
         image_header_row.addWidget(self.clear_images_button)
 
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
+
         generate_images_row = QHBoxLayout()
         generate_images_row.addWidget(self.generate_images_checkbox)
         generate_images_row.addWidget(self.image_gen_count_spin)
@@ -254,6 +288,7 @@ class InputTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(keyword_row)
         layout.addWidget(self.manual_login_checkbox)
+        layout.addLayout(ai_model_row)
         layout.addLayout(generate_images_row)
         layout.addLayout(agents_md_row)
         layout.addLayout(reuse_row)
@@ -298,10 +333,24 @@ class InputTab(QWidget):
             return
         self.agents_md_path = path
         self.agents_md_label.setText(f"AGENTS.md: {path}")
+        self._save_input_defaults()
 
     def _on_reset_agents_md(self) -> None:
         self.agents_md_path = None
         self.agents_md_label.setText("AGENTS.md: 기본값(PostResult/AGENTS.md)")
+        self._save_input_defaults()
+
+    def _save_input_defaults(self) -> None:
+        """AI 이미지 생성 사용 여부/개수, 커스텀 AGENTS.md 경로를 바꿀 때마다 즉시
+        input_defaults.json에 저장해 다음 앱 실행에도 같은 값으로 시작하게 한다."""
+        pipeline.save_input_defaults(
+            pipeline.InputDefaults(
+                generate_images=self.generate_images_checkbox.isChecked(),
+                image_gen_count=self.image_gen_count_spin.value(),
+                agents_md_path=self.agents_md_path,
+                ai_model=self.ai_model_combo.currentData(),
+            )
+        )
 
     def to_pipeline_context(self) -> PipelineContext:
         """현재 입력 탭의 값으로 PipelineContext를 생성한다.
@@ -311,7 +360,7 @@ class InputTab(QWidget):
         """
         return PipelineContext(
             keyword=self.keyword_edit.text(),
-            comment=self.comment_edit.text(),
+            comment=self.comment_edit.toPlainText(),
             image_paths=list(self.image_drop_list.image_paths),
             use_crawling=self.use_crawling_checkbox.isChecked(),
             generate_images=self.generate_images_checkbox.isChecked(),
@@ -319,6 +368,7 @@ class InputTab(QWidget):
             agents_md_path=self.agents_md_path,
             reuse_work_dir=self.selected_reuse_dir,
             login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
+            ai_model=self.ai_model_combo.currentData(),
         )
 
 
@@ -345,12 +395,18 @@ class TaskEditDialog(QDialog):
         self.use_crawling_checkbox = QCheckBox("크롤링 사용")
         self.use_crawling_checkbox.setChecked(task.use_crawling if task is not None else True)
 
-        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 codex exec에 위임)")
-        self.generate_images_checkbox.setChecked(task.generate_images if task is not None else False)
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        idx = self.ai_model_combo.findData(task.ai_model if task is not None else "codex:gpt-5.6-sol")
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(task.generate_images if task is not None else True)
 
         self.image_gen_count_spin = QSpinBox()
         self.image_gen_count_spin.setRange(1, 10)
-        self.image_gen_count_spin.setValue(task.image_gen_count if task is not None else 1)
+        self.image_gen_count_spin.setValue(task.image_gen_count if task is not None else 3)
         self.image_gen_count_spin.setSuffix("장")
         self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
         self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
@@ -365,10 +421,16 @@ class TaskEditDialog(QDialog):
         self.agents_md_reset_button.clicked.connect(self._on_reset_agents_md)
 
         self.manual_login_checkbox = QCheckBox("네이버 로그인 수동으로 진행(자동 입력 안 함)")
-        self.manual_login_checkbox.setChecked((task.login_mode == "manual") if task is not None else False)
+        self.manual_login_checkbox.setChecked((task.login_mode == "manual") if task is not None else True)
 
-        self.comment_edit = QLineEdit(task.comment if task is not None else "")
+        self.comment_edit = QTextEdit(task.comment if task is not None else "")
         self.comment_edit.setPlaceholderText("comment(선택)")
+        self.comment_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.comment_edit.setFixedHeight(self.comment_edit.fontMetrics().lineSpacing() * 5 + 16)
+
+        self._keyword_manually_edited = task is not None and task.keyword != task.label
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        self.keyword_edit.textEdited.connect(self._on_keyword_edited)
 
         self.image_drop_list = ImageDropList()
         if task is not None:
@@ -380,6 +442,11 @@ class TaskEditDialog(QDialog):
         image_header_row.addWidget(QLabel("이미지"))
         image_header_row.addStretch()
         image_header_row.addWidget(self.clear_images_button)
+
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
 
         generate_images_row = QHBoxLayout()
         generate_images_row.addWidget(self.generate_images_checkbox)
@@ -401,6 +468,7 @@ class TaskEditDialog(QDialog):
         layout.addWidget(QLabel("키워드"))
         layout.addWidget(self.keyword_edit)
         layout.addWidget(self.use_crawling_checkbox)
+        layout.addLayout(ai_model_row)
         layout.addLayout(generate_images_row)
         layout.addLayout(agents_md_row)
         layout.addWidget(self.manual_login_checkbox)
@@ -415,6 +483,14 @@ class TaskEditDialog(QDialog):
             QMessageBox.warning(self, "태스크 편집", "키워드를 입력해주세요.")
             return
         self.accept()
+
+    def _on_label_changed(self, text: str) -> None:
+        if self._keyword_manually_edited:
+            return
+        self.keyword_edit.setText(text)
+
+    def _on_keyword_edited(self, _text: str) -> None:
+        self._keyword_manually_edited = True
 
     def _on_browse_agents_md(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -436,13 +512,14 @@ class TaskEditDialog(QDialog):
             task_id=self._task_id,
             label=label,
             keyword=keyword,
-            comment=self.comment_edit.text(),
+            comment=self.comment_edit.toPlainText(),
             image_paths=list(self.image_drop_list.image_paths),
             use_crawling=self.use_crawling_checkbox.isChecked(),
             generate_images=self.generate_images_checkbox.isChecked(),
             image_gen_count=self.image_gen_count_spin.value(),
             agents_md_path=self.agents_md_path,
             login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
+            ai_model=self.ai_model_combo.currentData(),
         )
 
 
@@ -665,8 +742,8 @@ class RunLogTab(QWidget):
     클릭 시 _ensure_context()가 work_dir을 한 번 정하고 이후 클릭들은 이를 재사용한다.
     """
 
-    STEP_NAMES = ("crawl", "image_gen", "generate", "publish")
-    STEP_LABELS = {"crawl": "크롤링", "image_gen": "이미지 생성", "generate": "AI 생성", "publish": "발행"}
+    STEP_NAMES = ("crawl", "generate", "image_gen", "publish")
+    STEP_LABELS = {"crawl": "크롤링", "generate": "AI 생성", "image_gen": "이미지 생성", "publish": "발행"}
 
     def __init__(
         self, input_tab: InputTab, job_queue: JobQueueManager | None = None, parent: QWidget | None = None
@@ -693,10 +770,10 @@ class RunLogTab(QWidget):
 
         self.crawl_button = QPushButton("1. 크롤링만 실행")
         self.crawl_button.clicked.connect(self._on_crawl_only_clicked)
-        self.image_gen_button = QPushButton("2. 이미지 생성만 실행")
-        self.image_gen_button.clicked.connect(self._on_image_gen_only_clicked)
-        self.generate_button = QPushButton("3. AI 글작성만 실행")
+        self.generate_button = QPushButton("2. AI 글작성만 실행")
         self.generate_button.clicked.connect(self._on_generate_only_clicked)
+        self.image_gen_button = QPushButton("3. 이미지 생성만 실행")
+        self.image_gen_button.clicked.connect(self._on_image_gen_only_clicked)
         self.publish_button = QPushButton("4. 블로그 발행만 실행")
         self.publish_button.clicked.connect(self._on_publish_only_clicked)
         self.reset_button = QPushButton("작업 폴더 초기화")
@@ -706,8 +783,8 @@ class RunLogTab(QWidget):
 
         step_button_row = QHBoxLayout()
         step_button_row.addWidget(self.crawl_button)
-        step_button_row.addWidget(self.image_gen_button)
         step_button_row.addWidget(self.generate_button)
+        step_button_row.addWidget(self.image_gen_button)
         step_button_row.addWidget(self.publish_button)
         step_button_row.addWidget(self.reset_button)
         step_button_row.addWidget(self.open_work_dir_button)
@@ -977,45 +1054,46 @@ class RunLogTab(QWidget):
 
     def _on_generate_only_finished(self, result: object) -> None:
         assert isinstance(result, tuple)
-        status, md_path = result
+        status, md_path, generated_paths = result
         self.md_path = md_path
         self._set_step_status("generate", status)
-        self.log_view.append(f"[AI 글작성만 실행] 완료: {status}, md_path={md_path}")
+        self.log_view.append(
+            f"[AI 글작성만 실행] 완료: {status}, md_path={md_path}"
+            + (f" (이미지 {len(generated_paths)}장 함께 생성됨)" if generated_paths else "")
+        )
         self.generate_button.setEnabled(True)
 
     def _on_image_gen_only_clicked(self) -> None:
-        """이미지 생성 단계만 단독으로 테스트한다. AI 글작성보다 먼저 실행되는 단계이므로
-        md가 아니라 크롤링 결과(blog_txts, 없으면 키워드/코멘트만)를 참고 자료로 쓴다.
-        입력 탭의 "AI 실사 이미지 생성" 체크와 무관하게 여기서는 항상 시도한다고 오해하기
-        쉽지만, run_crawling과 동일한 이유로 pipeline.run_image_generation도
-        context.generate_images가 꺼져 있으면 "skipped"를 반환한다 — 실제로 테스트하려면
-        입력 탭에서 체크박스를 먼저 켜야 한다."""
+        """이미지만 별도로 재생성한다. Task 017부터 정상 흐름("2. AI 글작성만 실행"/전체
+        실행)은 글 작성과 이미지 생성을 같은 codex exec 호출 한 번으로 처리하므로, 이 버튼은
+        이미지가 마음에 안 들거나 실패했을 때 다시 시도하는 용도로만 남는다. self.md_path
+        (먼저 "AI 글작성만 실행"으로 만들어진 글)를 참고 자료로 쓰고, 생성한 이미지를 codex가
+        그 글에 직접 삽입한다. 아직 글작성을 실행하지 않았으면 md_path가 None이라 참고
+        텍스트/삽입 지시 없이 이미지만 생성된다(경고 로그로 안내). 입력 탭의 "AI 실사 이미지
+        생성" 체크와 무관하게 여기서는 항상 시도한다고 오해하기 쉽지만, run_crawling과 동일한
+        이유로 pipeline.run_image_generation도 context.generate_images가 꺼져 있으면
+        "skipped"를 반환한다 — 실제로 테스트하려면 입력 탭에서 체크박스를 먼저 켜야 한다."""
         context = self._ensure_context()
         assert self.work_dir is not None
 
         self._sync_images_to_work_dir()
 
-        if not self.blog_txts:
-            blog_dir_path = config.blog_dir(self.work_dir)
-            self.blog_txts = list(blog_dir_path.glob("*.txt")) if blog_dir_path.exists() else []
+        if self.md_path is None:
+            self.log_view.append("[이미지 생성만 실행] 아직 작성된 글이 없어 참고/삽입 없이 이미지만 생성합니다")
 
         self.image_gen_button.setEnabled(False)
         self._set_step_status("image_gen", "running")
         self.log_view.append("[이미지 생성만 실행] 시작")
 
         work_dir = self.work_dir
-        blog_txts = self.blog_txts
-        self.step_worker = StepWorker(lambda: pipeline.run_image_generation(context, work_dir, blog_txts))
+        md_path = self.md_path
+        self.step_worker = StepWorker(lambda: pipeline.run_image_generation(context, work_dir, md_path))
         self.step_worker.finished_signal.connect(self._on_image_gen_only_finished)
         self.step_worker.start()
 
     def _on_image_gen_only_finished(self, result: object) -> None:
-        """생성된 이미지를 context.image_paths에 더해, 이어서 "AI 글작성만 실행"을 누르면
-        codex exec 입력 이미지로도 전달되게 한다(run_pipeline의 전체 실행과 동일한 동작)."""
         assert isinstance(result, tuple)
         status, generated_paths = result
-        if generated_paths and self.context is not None:
-            self.context.image_paths = list(self.context.image_paths) + [str(p) for p in generated_paths]
         self._set_step_status("image_gen", status)
         self.log_view.append(f"[이미지 생성만 실행] 완료: {status} (생성된 이미지 {len(generated_paths)}장)")
         self.image_gen_button.setEnabled(True)
@@ -1321,10 +1399,19 @@ class MainWindow(QMainWindow):
         handler = self._log_handler
         self.destroyed.connect(lambda: logging.getLogger().removeHandler(handler))
 
+        # 탭 안의 버튼 행(예: 멀티 작업 탭의 7개 버튼, 실행·로그 탭의 6개 버튼)이 요구하는
+        # 자연스러운 너비가 QTabWidget의 minimumSizeHint로 그대로 전달되면, QSplitter가
+        # 그보다 좁게는 점진적으로 줄이지 못하고(수동으로 신고된 문제: "왼쪽창을 줄이는데
+        # 제한이 있어") 갑자기 완전히 접히는 것처럼 동작한다. 가로 sizePolicy를 Ignored로
+        # 바꾸면 QSplitter가 이 위젯의 minimumSizeHint를 폭 계산에 반영하지 않아 자유롭게
+        # 줄일 수 있다(Qt의 qSmartMinSize가 Ignored 정책일 때 minimumSizeHint를 건너뜀).
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Ignored, self.tabs.sizePolicy().verticalPolicy())
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.tabs)
         splitter.addWidget(self.log_panel)
         splitter.setSizes([700, 400])
+        splitter.setChildrenCollapsible(True)
         self.setCentralWidget(splitter)
 
         logger.info("MainWindow 초기화 완료: %d개 탭 생성", self.tabs.count())

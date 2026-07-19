@@ -11,6 +11,7 @@ def test_pipeline_context_default_instance():
     assert ctx.comment == ""
     assert ctx.image_paths == []
     assert ctx.use_crawling is True
+    assert ctx.ai_model == config.AI_MODEL_DEFAULT
     assert ctx.step_status == {
         "crawl": "pending",
         "image_gen": "pending",
@@ -55,6 +56,51 @@ def test_codex_exec_args_use_image_flag_and_no_prompt_text():
     assert "--output-last-message" in args
     # 프롬프트는 argv 길이 제한을 피하기 위해 stdin으로 전달하므로 위치 인자로 남지 않는다.
     assert "글을 작성해줘" not in args
+
+
+def test_codex_exec_args_include_model_flag_when_given():
+    args = config.build_codex_exec_args(
+        image_paths=[],
+        work_dir=Path("C:/work"),
+        output_last_message_path=Path("C:/work/output/last.txt"),
+        model="gpt-5.6-sol",
+    )
+    model_index = args.index("--model")
+    assert args[model_index + 1] == "gpt-5.6-sol"
+
+
+def test_claude_exec_args_use_permission_mode_and_model():
+    args = config.build_claude_exec_args("sonnet")
+    assert args == [
+        "claude",
+        "-p",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        "Read,Write,Edit,WebSearch,WebFetch",
+        "--max-turns",
+        "40",
+        "--bare",
+    ]
+
+
+def test_claude_exec_args_do_not_allow_bash():
+    """임의 셸 명령 실행까지 자동 승인하지 않도록 Bash는 허용 목록에서 제외한다(사용자 확정)."""
+    args = config.build_claude_exec_args("sonnet")
+    allowed_tools_index = args.index("--allowedTools")
+    assert "Bash" not in args[allowed_tools_index + 1]
+
+
+def test_parse_ai_model_splits_backend_and_model():
+    assert config.parse_ai_model("claude:sonnet") == ("claude", "sonnet")
+    assert config.parse_ai_model("codex:gpt-5.6-sol") == ("codex", "gpt-5.6-sol")
+
+
+def test_parse_ai_model_falls_back_to_default_on_malformed_value():
+    assert config.parse_ai_model("깨진값") == config.parse_ai_model(config.AI_MODEL_DEFAULT)
+    assert config.parse_ai_model("") == config.parse_ai_model(config.AI_MODEL_DEFAULT)
 
 
 def test_interpreter_config_has_crawler_and_publisher_keys():

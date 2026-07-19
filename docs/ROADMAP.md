@@ -149,6 +149,27 @@
   - ✅ `tests/test_image_generation.py` 신규 작성(4건), `tests/test_tasks.py`에 2건 추가, `tests/test_job_queue.py`에 `remove_pending` FIFO 취소 시나리오 1건 추가 — 전체 스위트 63건 전원 통과
   - GUI 헤드리스 스모크 테스트로 스핀박스 활성화 연동·`to_pipeline_context` 값 반영·대기 작업 삭제 배선을 실제 `MainWindow` 구성 후 확인(`pipeline.run_pipeline`을 가짜로 교체해 실제 서브프로세스는 호출하지 않음)
 
+- **Task 016: 이미지 생성을 글 작성 이후로 재배치 (사용자 요청, 4.8 세부)** ✅ - 완료
+  - ✅ `pipeline.py`: `run_pipeline`의 실행 순서를 크롤링 → **AI 생성** → **이미지 생성** → 발행으로 변경(기존에는 이미지 생성이 글 작성보다 먼저였음). `run_image_generation`이 크롤링 텍스트 스니펫 대신 `run_generation`이 만든 완성된 글 전체(md 내용)를 참고 자료로 받도록 시그니처를 `(context, work_dir, blog_txt_paths)` → `(context, work_dir, md_path: Path | None)`로 변경
+  - ✅ `_build_image_generation_prompt`가 글 파일명이 주어지면(`md_path` 존재) 이미지 생성 직후 codex 스스로 그 md를 열어 이미지 내용을 분석해 어울리는 위치에 `![]()` 형식으로 삽입하도록 지시하는 문구를 추가(사람이 다시 글을 수정하는 별도 왕복 없이 한 번의 codex exec 실행으로 생성+삽입 완료). 삽입 후 `config.normalize_image_paths_in_md`로 경로를 다시 정규화
+  - ✅ `app.py`: `RunLogTab`의 단계별 단독 실행 버튼 순서를 크롤링→AI 글작성→이미지 생성→발행으로 재배치("2. AI 글작성만 실행" / "3. 이미지 생성만 실행"), `_on_image_gen_only_clicked`가 `blog_txts` 대신 `self.md_path`를 사용하도록 변경
+  - ✅ `tests/test_image_generation.py`에 삽입 지시 문구/유무, md 내용 반영, 삽입된 절대경로 정규화 검증 추가, `tests/test_pipeline_on_step.py`의 `on_step` 호출 순서 기대값을 crawl→generate→image_gen→publish로 갱신 — 전체 스위트 72건 전원 통과
+
+- **Task 017: 글 작성·이미지 생성 codex exec 호출 통합 (사용자 요청)** ✅ - 완료
+  - ✅ `pipeline.py`: `_build_generation_prompt`가 `context.generate_images`가 켜져 있으면 `_build_inline_image_instruction`(신규)로 만든 "$imagegen으로 이 글에 어울리는 이미지 N장을 images/ 폴더에 저장하고, 글을 쓰면서 본문에 바로 `![]()`로 포함시켜라" 지시를 같은 프롬프트에 포함
+  - ✅ `run_generation`이 `context.generate_images`가 켜져 있을 때 실행 전/후 이미지 파일 스냅샷을 비교해 새로 생긴 파일만 `images/`로 채택(요청 장수만큼 캡)하고, 반환값을 `(status, md_path)` → `(status, md_path, generated_image_paths)`로 확장
+  - ✅ `run_pipeline`에서 `run_generation` 이후 별도 `run_image_generation` codex exec 호출을 제거하고, 반환된 `generated_image_paths`만으로 `image_gen` 단계 상태(success/failed/skipped)를 기록 — codex exec 2차 호출이 응답 없이 멈추는 문제(사용자 리포트: `이미지 생성: running`에서 계속 홀딩)를 근본적으로 없앰
+  - `run_image_generation`/`_build_image_generation_prompt`는 삭제하지 않고 유지: 실행·로그 탭의 "3. 이미지 생성만 실행" 버튼(이미지가 마음에 안 들 때 재시도하는 독립 기능)이 계속 이 함수를 사용
+  - ✅ 테스트: `_build_generation_prompt`에 이미지 지시 포함/생략 2건, `run_generation`이 같은 codex exec 안에서 이미지까지 채택하는지 1건(`tests/test_generation.py`), 기존 `run_generation` 반환 형태를 가정하던 테스트 전부(`tests/test_pipeline_orchestration.py`, `tests/test_pipeline_on_step.py`, `tests/test_run_log_and_result_tab.py`) 3-튜플로 갱신 — 전체 스위트 81건 전원 통과
+
+- **Task 018: 이미지 생성 실패 시 우회 스크립트 작성 금지, 로그 하이라이트/줄바꿈, 스플리터 자유 리사이즈 (사용자 요청)** ✅ - 완료
+  - ✅ `pipeline.py`: `_IMAGE_GENERATION_FALLBACK_BAN`(신규 상수)을 `_build_inline_image_instruction`(글 작성과 통합된 프롬프트)과 `_build_image_generation_prompt`(독립 재시도 프롬프트) 양쪽에 포함 — 과거 `$imagegen`이 실패하자 codex가 PIL 등으로 대체 이미지를 그리는 파이썬 스크립트를 직접 작성해버린 사례가 있어(사용자 리포트), 실패해도 우회 프로그램을 만들지 말고 이미지 없이 글만 완성하라고 명시
+  - ✅ `subprocess_runner.run()`이 codex exec 등에 stdin으로 전달하는 프롬프트를 `[CODEX 입력]` 마커를 붙여 한 줄씩 로깅(이전에는 프롬프트 자체가 로그에 전혀 남지 않았음)
+  - ✅ `app.py`의 `LogPanel`: `[CODEX 입력]` 마커가 있는 줄을 노란색 배경으로 하이라이트(사용자 요청 — codex에게 명령으로 전달하는 부분 구분), 모든 줄을 HTML로 이스케이프해서 렌더링(일반 로그에 우연히 `<`가 섞여도 태그로 오인되지 않도록)
+  - ✅ `app.py`의 `LogPanel.log_view`: `NoWrap` → `WidgetWidth`로 변경해 긴 줄이 패널 폭에 맞춰 자동 줄바꿈되도록 수정(사용자 리포트: 가로 스크롤 없이 한 화면에서 보고 싶음)
+  - ✅ `app.py`의 `MainWindow`: 좌우 스플리터(탭 영역 | 상세 로그)에서 탭 영역의 가로 `sizePolicy`를 `Ignored`로 바꿔, 버튼 행이 많은 탭("멀티 작업" 7개, "실행·로그" 6개)의 최소 너비가 스플리터 리사이즈를 막던 문제 해결(사용자 리포트: "왼쪽창을 줄이는 데 제한이 있어"), `setChildrenCollapsible(True)`도 명시
+  - ✅ 테스트: `_build_generation_prompt`/`_build_image_generation_prompt`에 우회 프로그램 금지 문구 포함 검증 2건 추가 — 전체 스위트 82건 전원 통과. 로그 하이라이트/줄바꿈/스플리터 리사이즈는 실제 GUI 렌더링이 필요해 `docs/MANUAL_QA_CHECKLIST.md`로 수동 검증 항목 추가
+
 ## 일정 및 마일스톤
 
 - PRD 8절에 명시된 대로 구체적 일정은 **TBD**이며, 위 Phase 순서가 제안 마일스톤(입력 GUI 골격 → AGENTS.md 편집 → 크롤링 연동 → codex exec 연동 → 발행 연동 → PostResult 저장/로그 → 통합 테스트)을 반영합니다.

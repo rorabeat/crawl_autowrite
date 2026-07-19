@@ -31,6 +31,10 @@ shrimp_data/
 tasks.json
 tasks.json.tmp
 
+# 입력 탭 기본값(사용자별 로컬 데이터, config.INPUT_DEFAULTS_JSON_PATH)
+input_defaults.json
+input_defaults.json.tmp
+
 # Claude Code 로컬 전용 설정/락 파일(팀 공유용 settings.json은 추적)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

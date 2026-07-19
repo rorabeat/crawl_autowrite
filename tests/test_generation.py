@@ -71,6 +71,67 @@ def test_build_generation_prompt_truncates_over_limit(monkeypatch, tmp_path):
     assert len(blog_section) == 50
 
 
+def test_build_generation_prompt_includes_web_search_instruction(monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="반도체주가")
+    prompt = pipeline._build_generation_prompt(context, [])
+
+    assert "웹 검색" in prompt
+    assert "최신 정보" in prompt
+
+
+def test_build_generation_prompt_includes_image_instruction_when_generate_images_on(monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="키워드", generate_images=True, image_gen_count=2)
+    prompt = pipeline._build_generation_prompt(context, [])
+
+    assert "$imagegen" in prompt
+    assert "정확히 2장" in prompt
+    assert "images" in prompt
+    assert "우회 프로그램" in prompt
+
+
+def test_build_generation_prompt_omits_image_instruction_when_generate_images_off(monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="키워드", generate_images=False)
+    prompt = pipeline._build_generation_prompt(context, [])
+
+    assert "$imagegen" not in prompt
+
+
+def test_run_generation_creates_images_in_same_codex_call_when_enabled(tmp_path, monkeypatch):
+    """Task 017: 글 작성과 이미지 생성을 codex exec 한 번으로 합쳐 요청한다(2차 codex exec
+    호출이 응답 없이 멈추는 문제가 있어 사용자 요청으로 통합)."""
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")
+
+    work_dir = tmp_path / "work"
+    captured_prompt = {}
+
+    def fake_run(args, cwd=None, input_text=None, **kwargs):
+        captured_prompt["text"] = input_text
+        images_dir = config.images_dir(work_dir)
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (images_dir / "generated_0.png").write_bytes(b"fake")
+        md_path = work_dir / f"{config.safe_title('오키나와 여행')}.md"
+        md_path.write_text("# 오키나와 여행\n\n본문입니다.\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    context = pipeline.PipelineContext(
+        keyword="오키나와 여행", use_crawling=False, generate_images=True, image_gen_count=1
+    )
+
+    status, md_path, generated_images = pipeline.run_generation(context, work_dir, [])
+
+    assert status == "success"
+    assert len(generated_images) == 1
+    assert "$imagegen" in captured_prompt["text"]
+
+
 def test_run_generation_passes_absolute_image_paths_and_writes_md(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")
 
@@ -92,14 +153,81 @@ def test_run_generation_passes_absolute_image_paths_and_writes_md(tmp_path, monk
         keyword="오키나와 여행", image_paths=[str(image_file)], use_crawling=False
     )
 
-    status, md_path = pipeline.run_generation(context, work_dir, [])
+    status, md_path, generated_images = pipeline.run_generation(context, work_dir, [])
 
     assert status == "success"
     assert md_path.exists()
     assert md_path.read_text(encoding="utf-8") == "생성된 본문"
+    assert generated_images == []
 
     image_index = captured_args["args"].index("--image")
     assert Path(captured_args["args"][image_index + 1]) == image_file.resolve()
+
+
+def test_run_generation_uses_claude_backend_when_ai_model_is_claude(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")
+
+    captured = {}
+
+    def fake_run(args, cwd=None, input_text=None, tee_path=None, **kwargs):
+        captured["args"] = args
+        captured["cwd"] = cwd
+        captured["tee_path"] = tee_path
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    work_dir = tmp_path / "work"
+    context = pipeline.PipelineContext(keyword="오키나와 여행", use_crawling=False, ai_model="claude:sonnet")
+
+    pipeline.run_generation(context, work_dir, [])
+
+    assert captured["args"] == config.build_claude_exec_args("sonnet")
+    assert captured["cwd"] == work_dir
+    assert captured["tee_path"] == config.output_dir(work_dir) / "last_message.txt"
+
+
+def test_run_generation_falls_back_to_tee_path_when_claude_backend_and_no_md_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")
+
+    def fake_run(args, cwd=None, input_text=None, tee_path=None, **kwargs):
+        if tee_path is not None:
+            tee_path.parent.mkdir(parents=True, exist_ok=True)
+            tee_path.write_text("claude가 응답한 본문", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    work_dir = tmp_path / "work"
+    context = pipeline.PipelineContext(keyword="제목없는글", use_crawling=False, ai_model="claude:sonnet")
+
+    status, md_path, generated_images = pipeline.run_generation(context, work_dir, [])
+
+    assert status == "success"
+    assert md_path.read_text(encoding="utf-8") == "claude가 응답한 본문"
+
+
+def test_run_generation_passes_model_to_codex_backend(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")
+
+    captured_args = {}
+
+    def fake_run(args, **kwargs):
+        captured_args["args"] = args
+        output_dir = config.output_dir(work_dir)
+        (output_dir / "last_message.txt").write_text("생성된 본문", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    work_dir = tmp_path / "work"
+    context = pipeline.PipelineContext(keyword="키워드", use_crawling=False, ai_model="codex:gpt-5.6-sol")
+
+    pipeline.run_generation(context, work_dir, [])
+
+    assert "--model" in captured_args["args"]
+    model_index = captured_args["args"].index("--model")
+    assert captured_args["args"][model_index + 1] == "gpt-5.6-sol"
 
 
 def test_resolve_agents_md_content_uses_custom_path_when_set(tmp_path):
@@ -146,8 +274,9 @@ def test_run_generation_with_custom_agents_md_still_detects_generated_md(tmp_pat
         keyword="제목", use_crawling=False, agents_md_path=str(custom)
     )
 
-    status, md_path = pipeline.run_generation(context, work_dir, [])
+    status, md_path, generated_images = pipeline.run_generation(context, work_dir, [])
 
     assert status == "success"
     assert md_path.name != "AGENTS.md"
     assert md_path.read_text(encoding="utf-8") == "생성된 본문"
+    assert generated_images == []

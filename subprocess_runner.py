@@ -33,6 +33,7 @@ def run(
     timeout: float | None = None,
     on_output: Callable[[str], None] | None = None,
     input_text: str | None = None,
+    tee_path: Path | None = None,
 ) -> int:
     """인자 리스트로 서브프로세스를 실행하고 종료 코드를 반환한다.
 
@@ -47,6 +48,12 @@ def run(
     input_text가 주어지면 stdin으로 흘려보낸 뒤 즉시 닫는다. Windows의 명령줄 길이
     제한(약 8191자)을 넘는 긴 프롬프트를 argv로 넘기면 "The command line is too long."
     오류가 나므로, 그런 경우 호출부는 인자 대신 이 옵션으로 전달해야 한다.
+
+    tee_path가 주어지면 표준출력 전체를 그 파일에도 그대로 적는다. codex exec는
+    --output-last-message로 최종 응답만 별도 파일에 저장해주지만, claude CLI에는
+    대응하는 옵션이 없어(사용자 요청으로 추가한 claude 백엔드) 이 옵션으로 대체한다
+    (전체 stdout이라 codex의 "최종 응답만"과는 의미가 정확히 같지는 않지만, 둘 다
+    "1순위 결과 파일을 못 찾았을 때의 폴백"일 뿐이라 호출부 입장에서는 동일하게 쓸 수 있다).
     """
     effective_env = dict(env) if env is not None else dict(os.environ)
     effective_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -73,6 +80,12 @@ def run(
     )
 
     if input_text is not None:
+        # stdin으로 넘기는 프롬프트는 codex exec에게 "명령"으로 전달되는 부분이므로, GUI
+        # 로그(LogPanel.append_line)가 이를 알아보고 하이라이트할 수 있게 고정 마커를 붙여
+        # 한 줄씩 로깅한다(사용자 요청). 프로세스 stdout과 뒤섞이지 않도록 stdin에 쓰기
+        # 직전에 로깅한다.
+        for prompt_line in input_text.splitlines() or [""]:
+            logger.info("[CODEX 입력] %s", prompt_line)
         assert proc.stdin is not None
         proc.stdin.write(input_text)
         proc.stdin.close()
@@ -81,31 +94,43 @@ def run(
     thread = threading.Thread(target=_reader_thread, args=(proc.stdout, line_queue), daemon=True)
     thread.start()
 
-    start = time.monotonic()
-    while True:
-        if timeout is not None:
-            remaining = timeout - (time.monotonic() - start)
-            if remaining <= 0:
-                proc.kill()
-                proc.wait()
-                thread.join(timeout=1)
-                logger.warning("subprocess_runner.run 타임아웃: args=%s", args)
-                return -1
-            wait_for = min(remaining, 0.5)
-        else:
-            wait_for = None
+    tee_file = None
+    if tee_path is not None:
+        tee_path.parent.mkdir(parents=True, exist_ok=True)
+        # 자식이 도중에 kill돼도(타임아웃 등) 그때까지의 출력이 남도록 줄 단위 버퍼링으로 연다.
+        tee_file = open(tee_path, "w", encoding="utf-8", buffering=1)
 
-        try:
-            line = line_queue.get(timeout=wait_for)
-        except queue.Empty:
-            continue
+    try:
+        start = time.monotonic()
+        while True:
+            if timeout is not None:
+                remaining = timeout - (time.monotonic() - start)
+                if remaining <= 0:
+                    proc.kill()
+                    proc.wait()
+                    thread.join(timeout=1)
+                    logger.warning("subprocess_runner.run 타임아웃: args=%s", args)
+                    return -1
+                wait_for = min(remaining, 0.5)
+            else:
+                wait_for = None
 
-        if line is _SENTINEL:
-            break
+            try:
+                line = line_queue.get(timeout=wait_for)
+            except queue.Empty:
+                continue
 
-        if on_output:
-            on_output(line)
-        logger.info(line)
+            if line is _SENTINEL:
+                break
 
-    thread.join(timeout=1)
-    return proc.wait()
+            if tee_file is not None:
+                tee_file.write(line + "\n")
+            if on_output:
+                on_output(line)
+            logger.info(line)
+
+        thread.join(timeout=1)
+        return proc.wait()
+    finally:
+        if tee_file is not None:
+            tee_file.close()

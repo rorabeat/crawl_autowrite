@@ -31,7 +31,7 @@ def test_run_pipeline_calls_steps_in_order_and_writes_result_json(tmp_path, monk
         call_order.append("generate")
         md_path = config.output_dir(work_dir) / "제목.md"
         md_path.write_text("본문", encoding="utf-8")
-        return "success", md_path
+        return "success", md_path, []
 
     def fake_run_publish(md_path, work_dir, login_mode="auto"):
         call_order.append("publish")
@@ -59,7 +59,7 @@ def test_run_pipeline_skips_publish_when_generation_failed(tmp_path, monkeypatch
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
 
     monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "success")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None))
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
 
     publish_called = []
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: publish_called.append(1))
@@ -74,7 +74,7 @@ def test_run_pipeline_skips_publish_when_generation_failed(tmp_path, monkeypatch
 def test_run_pipeline_copies_images_to_images_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
     monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "skipped")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None))
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
     image_file = tmp_path / "photo.jpg"
@@ -123,7 +123,7 @@ def test_run_pipeline_skips_crawling_and_image_copy_when_reusing(tmp_path, monke
 
     crawl_called = []
     monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: crawl_called.append(1))
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None))
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
     context = pipeline.PipelineContext(keyword="재사용", reuse_work_dir=reuse_dir)

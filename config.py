@@ -67,6 +67,81 @@ CODEX_EXEC_SUBCOMMAND = "exec"
 PROMPT_MAX_CHARS = 20000
 
 
+# ---------------------------------------------------------------------------
+# B'. AI 글 생성 — claude CLI(`claude -p`) (사용자 요청: codex 외 Claude Sonnet도 선택 가능하게)
+# `claude --help` 실측 확인. codex exec와 달리 --cd/--output-last-message에 대응하는
+# 옵션이 없다: 작업 디렉터리는 subprocess Popen의 cwd로(호출부 책임), 마지막 응답 저장은
+# subprocess_runner.run(tee_path=...)로 표준출력 전체를 캡처해 대신한다.
+# ---------------------------------------------------------------------------
+CLAUDE_EXEC_COMMAND = "claude"
+
+# 무인 실행에서 승인 대기 없이 도구를 쓰도록 명시적으로 허용하는 목록(사용자 확정).
+# --permission-mode acceptEdits만으로는 Edit/Write류만 자동 승인되고 WebSearch/WebFetch 같은
+# 비-edit 도구는 여전히 승인 대기 상태가 되어 무인 서브프로세스에서 멈출 수 있다 — 블로그 글
+# 작성 프롬프트(_WEB_SEARCH_INSTRUCTION)가 웹 검색을 지시하므로 WebSearch/WebFetch도 포함한다.
+# Bash는 포함하지 않는다(임의 셸 명령 실행까지 자동 승인할 필요는 없음, 사용자 확정).
+CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,WebSearch,WebFetch"
+
+# PR 리뷰처럼 짧은 작업 기준(3턴)이 아니라, 웹 검색을 여러 번 거쳐 글을 완성하는 흐름을
+# 고려한 여유 있는 상한(사용자 확정) — 무한 폭주만 막는 안전장치일 뿐 일반적인 실행에서는
+# 도달하지 않을 것으로 예상.
+CLAUDE_MAX_TURNS = 40
+
+
+def build_claude_exec_args(model: str) -> list[str]:
+    """claude CLI 비대화형(-p) 호출 인자를 만든다.
+
+    --permission-mode acceptEdits로 파일 쓰기 확인 프롬프트 없이 진행하게 한다 —
+    오케스트레이터가 자식 프로세스와 대화형으로 승인을 주고받을 수 없으므로, codex의
+    --sandbox workspace-write(승인 없이 작업 디렉터리 쓰기 허용)와 같은 취지다.
+
+    --allowedTools/--max-turns도 같은 이유(무인 실행)로 필요하다: 승인 대기로 멈추거나
+    턴이 무한정 늘어나는 것을 막는다. --bare로 사용자의 전역 hooks/skills/MCP 자동탐색을
+    건너뛰어 오케스트레이터 실행이 로컬 claude 설정에 좌우되지 않게 한다(시작 속도도 개선).
+    --output-format은 의도적으로 지정하지 않는다 — 기본(평문) stdout을
+    subprocess_runner.run(tee_path=...)가 그대로 캡처해 codex의 --output-last-message와
+    동일하게 "최종 응답 텍스트" 폴백으로 쓰기 때문에, json으로 바꾸면 이 폴백 로직이
+    깨진다(별도 파싱 구현 전까지는 평문 유지, 사용자 확정).
+    """
+    return [
+        CLAUDE_EXEC_COMMAND,
+        "-p",
+        "--model",
+        model,
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        CLAUDE_ALLOWED_TOOLS,
+        "--max-turns",
+        str(CLAUDE_MAX_TURNS),
+        "--bare",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# AI 모델 선택 (사용자 요청): codex(GPT-5.5/GPT-5.6 Sol) 또는 Claude Sonnet 중 하나를 골라
+# AI 글/이미지 생성에 사용한다. "백엔드:모델명" 형태의 문자열 하나로 인코딩해
+# InputDefaults/TaskItem/PipelineContext에 그대로 저장한다(값 하나로 백엔드+모델을 함께 관리).
+# ---------------------------------------------------------------------------
+AI_MODEL_CHOICES: list[tuple[str, str]] = [
+    ("Codex · GPT-5.5", "codex:gpt-5.5"),
+    ("Codex · GPT-5.6 Sol", "codex:gpt-5.6-sol"),
+    ("Claude Sonnet", "claude:sonnet"),
+]
+AI_MODEL_DEFAULT = AI_MODEL_CHOICES[0][1]
+
+
+def parse_ai_model(value: str) -> tuple[str, str]:
+    """"백엔드:모델명" 문자열을 (백엔드, 모델명)으로 분리한다.
+
+    저장된 값이 비어있거나 형식이 이상하면(예: 구버전 값, 손상된 JSON) AI_MODEL_DEFAULT로
+    폴백한다 — tasks.json/input_defaults.json의 기존 손상 방어 정책과 동일하다.
+    """
+    candidate = value if value and ":" in value else AI_MODEL_DEFAULT
+    backend, _, model = candidate.partition(":")
+    return backend, model
+
+
 def safe_title(name: str) -> str:
     """제목을 파일명/폴더명으로 안전하게 사용할 수 있도록 정리한다.
 
@@ -124,6 +199,7 @@ def build_codex_exec_args(
     work_dir: Path,
     output_last_message_path: Path,
     sandbox: str = "workspace-write",
+    model: str | None = None,
 ) -> list[str]:
     """codex exec 서브프로세스 인자 리스트를 만든다.
 
@@ -131,12 +207,18 @@ def build_codex_exec_args(
     인터페이스 활용). 프롬프트는 argv가 아니라 stdin으로 전달한다 — 크롤링 결과를 포함하면
     Windows 명령줄 길이 제한(약 8191자)을 넘어 "The command line is too long." 오류가
     나므로, codex exec의 "[PROMPT]가 없으면 stdin에서 읽는다" 동작을 활용한다.
+
+    model이 주어지면 -m/--model로 넘겨 이번 호출에만 특정 모델(예: gpt-5.5, gpt-5.6-sol)을
+    쓰도록 강제한다(실측: `codex exec --help`에 `-m, --model <MODEL>` 있음). 생략하면
+    ~/.codex/config.toml의 전역 기본 모델을 그대로 쓴다.
     """
     args = [CODEX_EXEC_COMMAND, CODEX_EXEC_SUBCOMMAND]
     for image_path in image_paths:
         args += ["--image", image_path]
     args += ["--cd", str(work_dir)]
     args += ["--sandbox", sandbox]
+    if model:
+        args += ["--model", model]
     args += ["--output-last-message", str(output_last_message_path)]
     return args
 
@@ -208,6 +290,10 @@ AGENTS_MD_PATH = POST_RESULT_ROOT / "AGENTS.md"
 # 저장된 태스크(대기열에 넣기 전 미리 만들어 둔 작업 정의) 영속화 경로. _WORK_ROOT 기준이라
 # exe로 빌드해도 exe 옆에 생긴다(사용자별 로컬 데이터라 저장소에 커밋하지 않음).
 TASKS_JSON_PATH = _WORK_ROOT / "tasks.json"
+
+# 입력 탭의 "다음 실행에도 기억할" 기본값(AI 이미지 생성 사용 여부/개수, 커스텀 AGENTS.md
+# 경로) 영속화 경로. tasks.json과 동일한 이유로 _WORK_ROOT 기준, 저장소에 커밋하지 않음.
+INPUT_DEFAULTS_JSON_PATH = _WORK_ROOT / "input_defaults.json"
 
 _WORK_DIR_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_(?P<title>.+?)(?:_\d+)?$")
 

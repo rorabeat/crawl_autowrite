@@ -57,7 +57,7 @@ def test_run_log_tab_step_buttons_run_independently_and_show_prompt(qtbot, monke
     def fake_run_generation(context, work_dir, blog_txt_paths):
         md_path = config.output_dir(work_dir) / "제목.md"
         md_path.write_text("# 제목\n\n본문", encoding="utf-8")
-        return "success", md_path
+        return "success", md_path, []
 
     def fake_run_publish(md_path, work_dir, login_mode="auto"):
         return "success", None
@@ -148,7 +148,7 @@ def test_generate_only_copies_images_added_after_first_step_click(qtbot, monkeyp
     def fake_run_generation(context, work_dir, blog_txt_paths):
         md_path = config.output_dir(work_dir) / "제목.md"
         md_path.write_text("# 제목\n\n본문", encoding="utf-8")
-        return "success", md_path
+        return "success", md_path, []
 
     monkeypatch.setattr(pipeline, "run_generation", fake_run_generation)
     monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침 내용")

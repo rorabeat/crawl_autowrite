@@ -51,6 +51,7 @@ def test_task_item_to_pipeline_context_maps_fields():
         image_gen_count=4,
         agents_md_path="C:/agents/custom.md",
         login_mode="manual",
+        ai_model="claude:sonnet",
     )
     ctx = task.to_pipeline_context()
 
@@ -62,7 +63,39 @@ def test_task_item_to_pipeline_context_maps_fields():
     assert ctx.image_gen_count == 4
     assert ctx.agents_md_path == "C:/agents/custom.md"
     assert ctx.login_mode == "manual"
+    assert ctx.ai_model == "claude:sonnet"
     assert ctx.reuse_work_dir is None
+
+
+def test_task_item_ai_model_defaults_to_config_default():
+    task = TaskItem(task_id="x", label="라벨", keyword="키워드")
+    assert task.ai_model == config.AI_MODEL_DEFAULT
+
+
+def test_load_tasks_backfills_ai_model_for_legacy_json(tmp_path, monkeypatch):
+    tasks_path = tmp_path / "tasks.json"
+    monkeypatch.setattr(config, "TASKS_JSON_PATH", tasks_path)
+
+    legacy_task = {
+        "task_id": "legacy-1",
+        "label": "라벨",
+        "keyword": "키워드",
+        "comment": "",
+        "image_paths": [],
+        "use_crawling": True,
+        "generate_images": False,
+        "image_gen_count": 1,
+        "agents_md_path": None,
+        "login_mode": "auto",
+        "created_at": "2026-01-01T00:00:00",
+    }
+    import json
+
+    tasks_path.write_text(json.dumps([legacy_task]), encoding="utf-8")
+
+    loaded = pipeline.load_tasks()
+
+    assert loaded[0].ai_model == config.AI_MODEL_DEFAULT
 
 
 def test_task_item_agents_md_path_round_trips(tmp_path, monkeypatch):
@@ -90,6 +123,32 @@ def test_task_item_image_gen_count_round_trips(tmp_path, monkeypatch):
     loaded = pipeline.load_tasks()
 
     assert loaded[0].image_gen_count == 5
+
+
+def test_task_edit_dialog_ai_model_combo_defaults_and_round_trips(qtbot):
+    from app import TaskEditDialog
+
+    dialog = TaskEditDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.ai_model_combo.currentData() == "codex:gpt-5.6-sol"
+
+    idx = dialog.ai_model_combo.findData("claude:sonnet")
+    assert idx >= 0
+    dialog.ai_model_combo.setCurrentIndex(idx)
+    dialog.keyword_edit.setText("키워드")
+
+    task = dialog.get_task_item()
+    assert task.ai_model == "claude:sonnet"
+
+
+def test_task_edit_dialog_loads_existing_task_ai_model(qtbot):
+    from app import TaskEditDialog
+
+    task = TaskItem(task_id="x", label="라벨", keyword="키워드", ai_model="codex:gpt-5.6-sol")
+    dialog = TaskEditDialog(task=task)
+    qtbot.addWidget(dialog)
+
+    assert dialog.ai_model_combo.currentData() == "codex:gpt-5.6-sol"
 
 
 def test_task_manager_crud_persists_and_emits_changed(tmp_path, monkeypatch, qtbot):
