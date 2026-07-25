@@ -27,12 +27,30 @@ HEADING_SAFETY_DELAY_MS = 500
 PUBLISHED_URL_PATTERN = re.compile(r"blog\.naver\.com/[^/]+/\d+")
 HEADING_PREFIX = "## "
 SUBHEADING_STYLE_TIMEOUT_MS = 3_000
-SUBHEADING_FONT_SIZE = "16"
-# 실측 DOM(사용자 제공): 글자 크기 옵션은 role="listbox" 안의
-# button[data-role="option"][data-value="fs16"] 형태다. 트리거 버튼은 옵션과 같은
-# data-group="contentsToolbar" data-name="font-size"를 쓰지만 data-role="option"이
+# 실측 DOM(사용자 제공): 인용구 스타일 옵션(인용구 3 = 말풍선형)은
+# button[data-group="documentToolbar"][data-name="quotation"][data-role="option"][data-value="quotation_bubble"]
+# 형태다. 트리거 버튼은 옵션과 같은 data-group/data-name을 쓰지만 data-role="option"이
 # 없어(:not()으로 옵션과 구분) 열림 버튼만 고를 수 있다.
-FONT_SIZE_TRIGGER_SELECTOR = '[data-group="contentsToolbar"][data-name="font-size"]:not([data-role="option"])'
+QUOTATION_TRIGGER_SELECTOR = '[data-group="documentToolbar"][data-name="quotation"]:not([data-role="option"])'
+QUOTATION_BUBBLE_OPTION_SELECTOR = (
+    '[data-group="documentToolbar"][data-name="quotation"]'
+    '[data-role="option"][data-value="quotation_bubble"]'
+)
+
+# 링크 처리: 본문 줄이 마크다운 링크(`[텍스트](url)`) 또는 단독 URL 한 줄인 경우,
+# 화면에는 "[링크 클릭]"만 타이핑해두고 문서 전체 타이핑이 끝난 뒤 실제 URL을 연결한
+# 하이퍼링크로 바꾼다(소제목과 같은 이유로 지연 처리 — 서식 적용 직후 커서의
+# "다음 입력 서식"이 뒤에 오는 텍스트에 번지는 문제를 피한다).
+LINK_PLACEHOLDER = "[링크 클릭]"
+MD_LINK_LINE_PATTERN = re.compile(r"^\[[^\]]*\]\((https?://[^)\s]+)\)$")
+BARE_URL_LINE_PATTERN = re.compile(r"^(https?://\S+)$")
+LINK_STYLE_TIMEOUT_MS = 5_000
+# 실측 DOM(사용자 제공): 링크 버튼은 documentToolbar의 oglink 버튼이고, 클릭하면 뜨는
+# 팝업의 URL 입력창은 input.se-popup-oglink-input, 확인 버튼은
+# button.se-popup-button-confirm이다(값이 비어 있으면 disabled 상태).
+LINK_BUTTON_SELECTOR = '[data-group="documentToolbar"][data-name="oglink"]'
+LINK_URL_INPUT_SELECTOR = "input.se-popup-oglink-input"
+LINK_CONFIRM_BUTTON_SELECTOR = "button.se-popup-button-confirm"
 
 
 class EditorError(Exception):
@@ -93,12 +111,14 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     본문 줄이 로컬 이미지 참조 경로를 포함하면 image_uploader.upload_image를
     호출해 해당 위치에 실제 이미지를 삽입하고(대체 텍스트/마크다운 문법은 타이핑하지
     않음), "## "로 시작하는 소제목 줄은 접두어만 뗀 순수 텍스트로 그대로 입력한다.
-    각 줄 처리 후 Enter로 줄바꿈한다. md의 문단 구분용 빈 줄은 타이핑하지 않고 건너뛴다
-    (그대로 타이핑하면 문장 사이마다 빈 문단이 하나 더 생겨 간격이 두 배로 벌어진다).
-    대신 소제목(##) 줄 앞에는 Enter를 한 번 더 눌러 이전 문단과의 간격을 의도적으로
-    한 줄 더 띄운다. 소제목 문단을 끝낸 직후에는 HEADING_SAFETY_DELAY_MS만큼 대기한다
-    (에디터가 새 문단을 안정시키기 전에 바로 다음 줄을 타이핑하면 그 타이핑이 멈춰버리는
-    문제가 실측 확인됨).
+    줄 전체가 마크다운 링크(`[텍스트](url)`) 또는 단독 URL이면 화면에는
+    LINK_PLACEHOLDER("[링크 클릭]")만 타이핑하고 실제 URL은 나중에 하이퍼링크로
+    연결한다. 각 줄 처리 후 Enter로 줄바꿈한다. md의 문단 구분용 빈 줄은 타이핑하지
+    않고 건너뛴다(그대로 타이핑하면 문장 사이마다 빈 문단이 하나 더 생겨 간격이
+    두 배로 벌어진다). 대신 소제목(##) 줄 앞에는 Enter를 한 번 더 눌러 이전 문단과의
+    간격을 의도적으로 한 줄 더 띄운다. 소제목 문단을 끝낸 직후에는
+    HEADING_SAFETY_DELAY_MS만큼 대기한다(에디터가 새 문단을 안정시키기 전에 바로
+    다음 줄을 타이핑하면 그 타이핑이 멈춰버리는 문제가 실측 확인됨).
 
     md 안의 이미지 경로는 "images/파일명"처럼 md 파일 자신을 기준으로 한 상대경로로
     적혀 있을 수 있다(사용자가 md를 직접 열어봐도 알아보기 쉽도록). 이 경로를 실제
@@ -106,13 +126,14 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     폴더, main.py가 --md 인자에서 계산해 넘겨줌) 기준으로 해석해야 한다 — 그래야
     main.py를 어느 디렉터리에서 실행하든 항상 올바른 파일을 찾는다.
 
-    타이핑 도중에는 굵게/글자크기 등 서식을 절대 건드리지 않는다 — 스타일을 적용한
-    직후의 커서는 "다음 입력 서식"으로 방금 서식을 그대로 물려받아서, 소제목 다음에
-    오는 본문까지 소제목 서식(16/굵게)을 물려받는 문제가 있었다(실측 확인, 커서
-    위치에서 명시적으로 되돌리는 시도도 안정적이지 않았다). 그래서 본문 전체를 순수
-    텍스트로 다 입력한 뒤, 함수 마지막에 소제목 텍스트들만 모아 한 번에
-    _apply_subheading_style로 스타일을 적용한다 — 이 시점 이후로는 더 타이핑할 내용이
-    없으므로 "다음 입력 서식 오염" 문제 자체가 발생할 수 없다.
+    타이핑 도중에는 인용구/링크 등 서식을 절대 건드리지 않는다 — 서식을 적용한
+    직후의 커서는 "다음 입력 서식"으로 방금 서식을 그대로 물려받아서, 소제목/링크
+    다음에 오는 본문까지 그 서식을 물려받는 문제가 있었다(소제목 기준 실측 확인,
+    커서 위치에서 명시적으로 되돌리는 시도도 안정적이지 않았다). 그래서 본문 전체를
+    순수 텍스트(링크는 LINK_PLACEHOLDER)로 다 입력한 뒤, 함수 마지막에 소제목
+    텍스트/링크 URL을 모아 한 번에 _apply_subheading_style / _apply_link로 서식을
+    적용한다 — 이 시점 이후로는 더 타이핑할 내용이 없으므로 "다음 입력 서식 오염"
+    문제 자체가 발생할 수 없다.
 
     .se-section-text locator를 한 번만 잡아 루프 내내 재사용하지 않고 매번
     _current_text_section(frame)으로 새로 조회한다 — 이미지를 삽입하면 네이버
@@ -124,14 +145,22 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
 
     local_image_paths = [img.path for img in parsed.images if img.is_local]
     heading_texts: list[str] = []
+    link_urls: list[str] = []
+    # 이번 실행에서 새로 타이핑할 LINK_PLACEHOLDER보다 앞서 문서에 이미 존재하는
+    # 개수. 플레이스홀더 텍스트가 모든 링크에서 동일하므로, 텍스트만으로는 어떤
+    # 인스턴스인지 구분할 수 없어 이 개수를 기준으로 nth() 인덱스를 계산한다.
+    existing_link_count = frame.get_by_text(LINK_PLACEHOLDER, exact=True).count()
 
     for line in parsed.body_lines:
-        if line.strip() == "":
+        stripped = line.strip()
+        if stripped == "":
             continue
 
         matched_path = next(
             (path for path in local_image_paths if path in line), None
         )
+        md_link_match = MD_LINK_LINE_PATTERN.match(stripped)
+        bare_url_match = BARE_URL_LINE_PATTERN.match(stripped)
         if matched_path:
             candidate = Path(matched_path)
             resolved_path = str(candidate if candidate.is_absolute() else (base_dir / candidate).resolve())
@@ -144,12 +173,19 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
             _current_text_section(frame).press("Enter")
             frame.owner.page.wait_for_timeout(HEADING_SAFETY_DELAY_MS)
             continue
+        elif md_link_match or bare_url_match:
+            url = md_link_match.group(1) if md_link_match else bare_url_match.group(1)
+            _current_text_section(frame).type(LINK_PLACEHOLDER, delay=TYPE_DELAY_MS)
+            link_urls.append(url)
         else:
             _current_text_section(frame).type(line, delay=TYPE_DELAY_MS)
         _current_text_section(frame).press("Enter")
 
     for heading_text in heading_texts:
         _apply_subheading_style(frame, heading_text)
+
+    for index, url in enumerate(link_urls):
+        _apply_link(frame, existing_link_count + index, url)
 
 
 def _current_text_section(frame: Any) -> Any:
@@ -161,38 +197,60 @@ def _current_text_section(frame: Any) -> Any:
     return frame.locator(".se-section-text").last
 
 
-def _set_font_size(frame: Any, value: str) -> None:
-    """상단 글자 크기 드롭다운을 열어 value(예: "16")를 선택한다.
+def _apply_quotation_bubble(frame: Any) -> None:
+    """상단 인용구 드롭다운을 열어 "인용구 3"(말풍선형, quotation_bubble)을 선택한다.
 
-    실측 DOM(사용자 제공)에 정확히 맞춘 선택자를 쓴다: 트리거 버튼(FONT_SIZE_TRIGGER_SELECTOR)을
-    클릭해 listbox를 연 뒤, data-value="fs{value}"인 option 버튼을 클릭한다.
+    실측 DOM(사용자 제공)에 정확히 맞춘 선택자를 쓴다: 트리거 버튼(QUOTATION_TRIGGER_SELECTOR)을
+    클릭해 옵션 목록을 연 뒤, data-value="quotation_bubble"인 option 버튼을 클릭한다.
     """
-    frame.locator(FONT_SIZE_TRIGGER_SELECTOR).first.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
-    frame.locator(f'[data-value="fs{value}"][data-role="option"]').click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+    frame.locator(QUOTATION_TRIGGER_SELECTOR).first.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+    frame.locator(QUOTATION_BUBBLE_OPTION_SELECTOR).click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
 
 
 def _apply_subheading_style(frame: Any, heading_text: str) -> None:
-    """이미 입력이 끝난 소제목 문단을 텍스트로 찾아 통째로 선택한 뒤 16 사이즈 + 굵게를 적용한다.
+    """이미 입력이 끝난 소제목 문단에 커서를 두고 "인용구 3"(말풍선형) 서식을 적용한다.
 
     input_body가 본문 전체 타이핑을 다 끝낸 뒤에만 이 함수를 호출한다. 타이핑 중간에
-    Home/Shift+End로 방금 친 줄을 선택해 스타일을 바꾸는 이전 방식은 두 가지 실측
-    버그가 있었다: (1) 타이핑 직후 에디터 내부 렌더링이 안정되기 전에 선택/서식
-    조작을 하면 레이스 컨디션으로 그 줄 자체가 삭제되는 경우가 있었고, (2) 스타일
-    적용 직후 커서의 "다음 입력 서식"이 그대로 남아 이어서 타이핑하는 본문까지 소제목
-    서식을 물려받았다(커서 위치에서 명시적으로 되돌리는 것도 신뢰할 수 없었다).
+    바로 서식을 적용하는 방식은 두 가지 실측 버그가 있었다: (1) 타이핑 직후 에디터
+    내부 렌더링이 안정되기 전에 서식 조작을 하면 레이스 컨디션으로 그 줄 자체가
+    삭제되는 경우가 있었고, (2) 서식 적용 직후 커서의 "다음 입력 서식"이 그대로 남아
+    이어서 타이핑하는 본문까지 소제목 서식을 물려받았다.
 
-    본문을 전부 순수 텍스트로 입력을 끝낸 뒤 완성된 문단을 텍스트로 찾아 3연속
-    클릭(문단 전체 선택, 브라우저 표준 동작)으로 선택하면 이 시점 이후 더 타이핑할
-    내용이 없으므로 두 문제 모두 원천적으로 발생하지 않는다. 동일 텍스트가 이전
-    실행에서 누적돼 여러 개 있을 수 있으므로 .last(가장 최근에 입력된 것)를 쓴다.
+    인용구 서식은 (글자 크기/굵게와 달리) 텍스트를 선택하지 않고 문단 안에 커서만
+    있어도 해당 블록 전체에 적용되는 블록 단위 서식이다(실측 확인). 그래서 문단
+    텍스트를 한 번만 클릭해 커서를 둔 뒤 인용구 드롭다운에서 옵션을 선택한다. 동일
+    텍스트가 이전 실행에서 누적돼 여러 개 있을 수 있으므로 .last(가장 최근에 입력된
+    것)를 쓴다.
     """
     try:
         target = frame.get_by_text(heading_text, exact=True).last
-        target.click(click_count=3, timeout=SUBHEADING_STYLE_TIMEOUT_MS)
-        _set_font_size(frame, SUBHEADING_FONT_SIZE)
-        target.press("Control+B")
+        target.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+        _apply_quotation_bubble(frame)
     except Exception:
         print(f"경고: 소제목 스타일 적용 실패({heading_text!r}), 일반 글자로 남습니다.", file=sys.stderr)
+
+
+def _apply_link(frame: Any, index: int, url: str) -> None:
+    """index번째 LINK_PLACEHOLDER("[링크 클릭]") 문단을 url로 연결된 하이퍼링크로 바꾼다.
+
+    input_body가 본문 전체 타이핑을 다 끝낸 뒤에만 이 함수를 호출한다(이유는
+    _apply_subheading_style 참조 — 서식 적용 직후 "다음 입력 서식"이 뒤에 오는
+    텍스트에 번지는 문제를 피하기 위함).
+
+    플레이스홀더 텍스트가 모든 링크에서 동일해 텍스트만으로는 어떤 인스턴스인지
+    구분할 수 없으므로, get_by_text(...).last 대신 input_body가 계산해 넘겨준
+    절대 인덱스(.nth(index))로 정확한 문단을 고른다. 실측 DOM(사용자 제공) 기준
+    흐름: 문단 텍스트 3연속 클릭으로 전체 선택 -> 링크 버튼(oglink) 클릭 -> 팝업의
+    URL 입력창에 url 입력 -> 확인 버튼(초기 disabled, 값이 채워지면 활성화) 클릭.
+    """
+    try:
+        target = frame.get_by_text(LINK_PLACEHOLDER, exact=True).nth(index)
+        target.click(click_count=3, timeout=LINK_STYLE_TIMEOUT_MS)
+        frame.locator(LINK_BUTTON_SELECTOR).click(timeout=LINK_STYLE_TIMEOUT_MS)
+        frame.locator(LINK_URL_INPUT_SELECTOR).fill(url)
+        frame.locator(LINK_CONFIRM_BUTTON_SELECTOR).click(timeout=LINK_STYLE_TIMEOUT_MS)
+    except Exception:
+        print(f"경고: 링크 적용 실패({url!r}), 일반 텍스트로 남습니다.", file=sys.stderr)
 
 
 def publish(page: Any, category: str | None) -> None:
