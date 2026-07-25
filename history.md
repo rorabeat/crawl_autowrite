@@ -1523,3 +1523,44 @@ comment 부분은 창 크기를 5줄 정도 표시될수 있게 해주고 자동
 
 다해줘
 
+
+**AI 처리 요약:** 세 가지 다 끝냈습니다.  1. **테스트 격리 버그 수정** — `test_input_tab_default_state_builds_pipeline_context`가 실제 `input_defaults.json`을 읽던 문제를 다른 테스트와 같은 패턴(`monkeypatch` + `tmp_path`)으로 격리. 2. **untracked 테스트 파일 검토*
+
+## 2026-07-20 22:56:47 - 사용자 프롬프트
+
+c:\Users\d2njj\Downloads\20260720_225609.png 참고하여 저장된 태스크 진행중이나 대기중으로 넘어가면 태스크를 삭제해줘
+
+
+## 2026-07-20 22:57:29 - 사용자 프롬프트
+
+/login
+
+
+**AI 처리 요약:** 전체 테스트(101개) 모두 통과했습니다.  ## 요약  스크린샷에서 확인한 "멀티 작업" 탭 구조를 보니, "저장된 태스크"(미리 만들어 둔 정의)와 "진행 중/대기 중 작업"(실제 큐에 들어간 작업)이 별개 목록으로 존재하는데, 지금�
+
+## 2026-07-21 21:23:31 - 사용자 프롬프트
+
+단독 실행 파일로 만들어주고 경로에 상관없이 정상 작동하도록 상대경로로 되어 있는지 확인해줘
+
+
+**AI 처리 요약:** Codex 쪽은 `--cd`로 절대경로 work_dir을 넘겨서 CWD와 무관하게 동작하고, claude 백엔드는 `cwd=work_dir`을 subprocess에 직접 넘긴다 — 둘 다 안전하다. 전체 경로 처리 확인이 끝났다.  ## 결론  **단독 실행 파일(EXE) 빌드**: 이미 `build/app
+
+## 2026-07-25 11:12:01 - 사용자 프롬프트
+
+소제목을 입력할때는
+[Image #3] 와 같은 방식을 사용해줘 해당 기능의 사용 버튼은 아래와 같아 이렇게 변경해줘
+그리고 인터넷 주소의 경우 클릭할수 있도록 하이퍼링크로 설정해 주고 [링크 클릭] 이런식으로 표시해줘
+ <button type="button" title="" class="__se-sentry se-toolbar-option-icon-button se-toolbar-option-insert-quotation-quotation_bubble-button" data-group="documentToolbar" data-name="quotation" data-role="option" data-value="quotation_bubble" data-type="icon-select" data-log="dot.quota2" aria-current="false"><span class="se-toolbar-tooltip">인용구 3</span></button>
+
+
+## 2026-07-25 11:25:42 - 사용자 프롬프트
+
+이건 버튼 정보야
+<button type="button" title="" class="se-oglink-toolbar-button se-document-toolbar-basic-button se-text-icon-toolbar-button __se-sentry" data-group="documentToolbar" data-type="basic" data-name="oglink" data-log="dot.link"><span class="se-toolbar-icon"></span><span class="se-toolbar-label" aria-hidden="true">링크</span><span class="se-toolbar-tooltip">링크 추가</span></button>
+
+팝업이 뜨면 아래 창에 링크를 입력하고
+<div class="se-popup-oglink-input-holder"><input type="url" class="se-popup-oglink-input" placeholder="URL을 입력하세요." value=""><button type="button" class="se-popup-oglink-button" data-log="pog.search"><span class="se-blind">검색</span></button><div class="se-popup-oglink-loading"><span class="se-blind">로딩중</span></div></div>
+
+확인 버튼을 누르면돼 
+<button type="button" class="se-popup-button se-popup-button-confirm" disabled="" data-log="pog.ok"><span class="se-popup-button-text">확인</span></button>
+

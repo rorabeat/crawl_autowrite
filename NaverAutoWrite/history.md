@@ -536,3 +536,10 @@ c:\Users\d2njj\Downloads\KakaoTalk_20260717_095712319_01.jpg md 파일 생성시
 19:10:16 I ModuleNotFoundError: No module named 'requests'
 19:10:16 I run_crawling: rc=1, 신규 파일 0건 복사
 
+
+**AI 처리 요약:** `NaverAutoWrite/editor.py`를 다음과 같이 변경했습니다.  **1. 소제목 스타일 (`_apply_subheading_style`)** - 기존: 글자크기 16 + 굵게 - 변경: 실제 제공해주신 DOM(`data-name="quotation"`, `data-value="quotation_bubble"`)을 기준으로 상단 인용구 드롭다�
+
+## 2026-07-25 11:40:29 - 사용자 프롬프트
+
+/git:commit
+
