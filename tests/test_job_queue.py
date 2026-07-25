@@ -114,3 +114,42 @@ def test_multi_task_tab_reflects_queue_state(qtbot, monkeypatch, tmp_path):
     release.set()
     qtbot.waitUntil(lambda: tab.pending_list.count() == 0 and tab.current_list.count() == 0, timeout=3000)
     assert "완료" in tab.log_view.toPlainText()
+
+
+def test_enqueue_removes_task_from_saved_list(qtbot, monkeypatch, tmp_path):
+    """대기열에 추가된 태스크는 "저장된 태스크" 목록에서 사라져야 한다(진행중/대기중으로
+    넘어간 뒤에도 저장 목록에 남아 있으면 중복 실행 오인이나 혼동을 일으키기 쉽다)."""
+    import config
+    import pipeline
+
+    monkeypatch.setattr(config, "TASKS_JSON_PATH", tmp_path / "tasks.json")
+
+    release = threading.Event()
+
+    def fake_run_pipeline(context, on_step=None):
+        release.wait(timeout=3)
+        return {"keyword": context.keyword, "steps": {}}
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+
+    queue = JobQueueManager()
+    task_manager = TaskManager()
+    tab = MultiTaskTab(queue, task_manager)
+    qtbot.addWidget(tab)
+
+    t1 = pipeline.TaskItem(task_id=pipeline.new_task_id(), label="A", keyword="kwA")
+    t2 = pipeline.TaskItem(task_id=pipeline.new_task_id(), label="B", keyword="kwB")
+    task_manager.add(t1)
+    task_manager.add(t2)
+
+    # "대기열에 추가" 버튼: 선택된 태스크 하나만 저장 목록에서 사라져야 한다.
+    tab.task_list.setCurrentRow(0)
+    tab._on_enqueue_selected()
+    assert [t.task_id for t in task_manager.tasks] == [t2.task_id]
+
+    # "전체 대기열에 추가" 버튼: 남은 태스크도 전부 사라져야 한다.
+    tab._on_enqueue_all()
+    assert task_manager.tasks == []
+
+    release.set()
+    qtbot.waitUntil(lambda: tab.pending_list.count() == 0 and tab.current_list.count() == 0, timeout=3000)

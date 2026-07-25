@@ -1284,14 +1284,18 @@ class MultiTaskTab(QWidget):
             return
         job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
         self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+        # 대기열로 넘어간 태스크는 "저장된 태스크" 목록에서 제거한다 — 진행중/대기중으로
+        # 넘어간 뒤에도 저장 목록에 남아 있으면 중복 실행 오인이나 혼동을 일으키기 쉽다.
+        self.task_manager.remove(task.task_id)
 
     def _on_enqueue_all(self) -> None:
         if not self.task_manager.tasks:
             self.log_view.append("[전체 대기열에 추가] 저장된 태스크가 없습니다")
             return
-        for task in self.task_manager.tasks:
+        for task in list(self.task_manager.tasks):
             job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
             self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+            self.task_manager.remove(task.task_id)
 
     def _refresh_queue(self) -> None:
         self.current_list.clear()
