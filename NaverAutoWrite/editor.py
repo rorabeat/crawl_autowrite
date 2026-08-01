@@ -27,15 +27,32 @@ HEADING_SAFETY_DELAY_MS = 500
 PUBLISHED_URL_PATTERN = re.compile(r"blog\.naver\.com/[^/]+/\d+")
 HEADING_PREFIX = "## "
 SUBHEADING_STYLE_TIMEOUT_MS = 3_000
-# 실측 DOM(사용자 제공): 인용구 스타일 옵션(인용구 3 = 말풍선형)은
-# button[data-group="documentToolbar"][data-name="quotation"][data-role="option"][data-value="quotation_bubble"]
-# 형태다. 트리거 버튼은 옵션과 같은 data-group/data-name을 쓰지만 data-role="option"이
-# 없어(:not()으로 옵션과 구분) 열림 버튼만 고를 수 있다.
-QUOTATION_TRIGGER_SELECTOR = '[data-group="documentToolbar"][data-name="quotation"]:not([data-role="option"])'
-QUOTATION_BUBBLE_OPTION_SELECTOR = (
+# 실측 DOM(라이브 디버깅으로 직접 확인): 인용구 스타일 옵션(인용구 2 = 버티컬 라인형)은
+# button[data-group="documentToolbar"][data-name="quotation"][data-role="option"][data-value="quotation_line"]
+# 형태다. data-role="option"이 없는 버튼이 트리거인데, 이 조건을 만족하는 버튼이
+# 실제로는 "두 개" 있다 — (1) data-value="default"에 aria-haspopup="false"인 "인용구
+# 추가"(퀵버튼, 클릭하면 드롭다운 없이 바로 기본 인용구가 삽입됨), (2) aria-haspopup="true"인
+# "인용구 선택"(진짜 드롭다운 트리거). :not([data-role="option"])만으로는 이 둘을 구분하지
+# 못해 .first가 (1)을 집어 클릭해버렸고, 그 결과 드롭다운 자체가 안 열려 옵션 버튼을 못 찾고
+# 타임아웃이 났다(실측 확인 — main.py 라이브 실행 크래시 재현 후 디버그 스크립트로 DOM
+# 덤프해서 확인). aria-haspopup="true" 조건을 추가해 (2)만 고른다.
+QUOTATION_TRIGGER_SELECTOR = (
     '[data-group="documentToolbar"][data-name="quotation"]'
-    '[data-role="option"][data-value="quotation_bubble"]'
+    ':not([data-role="option"])[aria-haspopup="true"]'
 )
+QUOTATION_LINE_OPTION_SELECTOR = (
+    '[data-group="documentToolbar"][data-name="quotation"]'
+    '[data-role="option"][data-value="quotation_line"]'
+)
+# 인용구는 텍스트 문단이 아니라 이미지처럼 독립된 se-component다(실측 확인). 안에서
+# Enter를 아무리 눌러도(직접 확인함, 4번까지 시도) 컴포넌트를 못 벗어나고 인용구
+# 내부에 새 줄만 계속 생긴다 — 출처 입력란까지 있는 하나의 블록이라 "끝"이 없다.
+# 유일하게 확인된 탈출 방법은 컴포넌트의 bounding box 바로 아래 빈 영역을 마우스로
+# 클릭하는 것(라이브 디버깅으로 확인 — 클릭 후 상단 문단 스타일 표시가 "인용구"에서
+# "본문"으로 바뀌고, 그 지점에 새 일반 문단이 생겨 이어서 타이핑한 텍스트가 인용구
+# 서식을 물려받지 않았다).
+QUOTATION_COMPONENT_SELECTOR = ".se-component.se-quotation"
+QUOTATION_EXIT_CLICK_MARGIN_PX = 15
 
 # 링크 처리: 본문 줄이 마크다운 링크(`[텍스트](url)`) 또는 단독 URL 한 줄인 경우,
 # 화면에는 "[링크 클릭]"만 타이핑해두고 문서 전체 타이핑이 끝난 뒤 실제 URL을 연결한
@@ -51,6 +68,61 @@ LINK_STYLE_TIMEOUT_MS = 5_000
 LINK_BUTTON_SELECTOR = '[data-group="documentToolbar"][data-name="oglink"]'
 LINK_URL_INPUT_SELECTOR = "input.se-popup-oglink-input"
 LINK_CONFIRM_BUTTON_SELECTOR = "button.se-popup-button-confirm"
+
+# 하이라이트 처리: 본문 줄 안에 `**문구**`(마크다운 굵게 문법 재활용)로 감싼 구간을
+# 가독성을 위한 배경색 강조 대상으로 본다. `**`는 항상 화면에서 벗겨내고(문자 그대로
+# 노출하지 않음), 문서 전체에서 HIGHLIGHT_MAX_COUNT개까지만 실제로 배경색을 적용한다
+# (그 이상은 마커만 벗기고 일반 텍스트로 남긴다 — 너무 많으면 가독성 향상이라는
+# 목적과 반대로 작용하기 때문).
+HIGHLIGHT_MARKER_PATTERN = re.compile(r"\*\*(.+?)\*\*")
+HIGHLIGHT_MAX_COUNT = 5
+# 사용자 제공 팔레트 기준 노란색 스와치.
+HIGHLIGHT_COLOR_HEX = "#fff593"
+HIGHLIGHT_TIMEOUT_MS = 5_000
+# 실측 DOM(사용자 제공 + 라이브 디버깅으로 검증): 배경색 버튼은 텍스트를 선택했을 때만
+# 뜨는 propertyToolbar(플로팅 툴바)에 있다. 색상 팔레트의 스와치 버튼은 "최근 사용한
+# 색상" 영역과 "프리셋" 영역 두 곳에 동시에 존재해(같은 data-color) 매칭이 2개 나와서
+# .first로 하나만 고른다(실측 확인 — strict mode violation 발생).
+BACKGROUND_COLOR_BUTTON_SELECTOR = '[data-group="propertyToolbar"][data-name="background-color"]'
+HIGHLIGHT_COLOR_SWATCH_SELECTOR = f'.se-color-palette[data-color="{HIGHLIGHT_COLOR_HEX}"]'
+# 라이브 디버깅으로 확인한 사실: Range/Selection을 JS로만 설정하면(window.getSelection
+# .addRange) 네이버 에디터 자체의 선택 동기화 로직이 갱신되지 않아 배경색 버튼을
+# 눌러도 아무 효과가 없었다. 그래서 JS로는 대상 문구의 화면 좌표(getClientRects)만
+# 얻어오고, 실제 선택은 Playwright의 실제 마우스 드래그(mouse.move/down/up)로 만든다
+# — 이 방식만 동작을 확인했다. .se-section-text 안의 텍스트 노드만 훑는다 —
+# 인용구(se-quotation)는 별도 컴포넌트라 소제목 텍스트는 검색 대상에서 자연히 제외된다.
+_HIGHLIGHT_RANGE_RECT_JS = """
+(phrase, occurrenceIndex) => {
+    const sections = document.querySelectorAll('.se-section-text');
+    let count = 0;
+    for (const section of sections) {
+        const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+            const idx = node.textContent.indexOf(phrase);
+            if (idx !== -1) {
+                if (count === occurrenceIndex) {
+                    const range = document.createRange();
+                    range.setStart(node, idx);
+                    range.setEnd(node, idx + phrase.length);
+                    const rects = range.getClientRects();
+                    if (rects.length === 0) return null;
+                    const first = rects[0];
+                    const last = rects[rects.length - 1];
+                    return {
+                        startX: first.left,
+                        startY: first.top + first.height / 2,
+                        endX: last.right,
+                        endY: last.top + last.height / 2,
+                    };
+                }
+                count++;
+            }
+        }
+    }
+    return null;
+}
+"""
 
 
 class EditorError(Exception):
@@ -126,14 +198,26 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     폴더, main.py가 --md 인자에서 계산해 넘겨줌) 기준으로 해석해야 한다 — 그래야
     main.py를 어느 디렉터리에서 실행하든 항상 올바른 파일을 찾는다.
 
-    타이핑 도중에는 인용구/링크 등 서식을 절대 건드리지 않는다 — 서식을 적용한
-    직후의 커서는 "다음 입력 서식"으로 방금 서식을 그대로 물려받아서, 소제목/링크
-    다음에 오는 본문까지 그 서식을 물려받는 문제가 있었다(소제목 기준 실측 확인,
-    커서 위치에서 명시적으로 되돌리는 시도도 안정적이지 않았다). 그래서 본문 전체를
-    순수 텍스트(링크는 LINK_PLACEHOLDER)로 다 입력한 뒤, 함수 마지막에 소제목
-    텍스트/링크 URL을 모아 한 번에 _apply_subheading_style / _apply_link로 서식을
-    적용한다 — 이 시점 이후로는 더 타이핑할 내용이 없으므로 "다음 입력 서식 오염"
-    문제 자체가 발생할 수 없다.
+    본문 줄 안에 `**문구**`(마크다운 굵게 문법 재활용)가 있으면 `**`는 항상 벗겨내고
+    (화면에 문자 그대로 노출하지 않음), 문서 전체에서 HIGHLIGHT_MAX_COUNT(5)개까지만
+    가독성 강조용 배경색(노란색)을 적용한다 — 링크와 같은 이유로 지연 처리한다
+    (_consume_highlight_markers로 (문구, 등장순번)만 모아두고 _apply_highlight는
+    본문 타이핑이 끝난 뒤 호출).
+
+    링크 서식은 절대 타이핑 도중 건드리지 않는다 — 서식을 적용한 직후의 커서는
+    "다음 입력 서식"으로 방금 서식을 그대로 물려받아서, 링크 다음에 오는 본문까지
+    그 서식을 물려받는 문제가 있었다(실측 확인). 그래서 링크는 본문 전체를 순수
+    텍스트(LINK_PLACEHOLDER)로 다 입력한 뒤, 함수 마지막에 URL을 모아 한 번에
+    _apply_link로 연결한다 — 이 시점 이후로는 더 타이핑할 내용이 없으므로 "다음
+    입력 서식 오염" 문제 자체가 발생할 수 없다.
+
+    소제목(인용구)은 이 방식을 쓸 수 없다 — 실측 확인 결과 네이버 에디터의
+    "인용구"는 글자크기/굵게처럼 이미 입력된 문단에 커서만 두고 적용하는 문단
+    서식이 아니라, 이미지/코드블록처럼 별도 컴포넌트를 삽입하는 기능이다. 그래서
+    타이핑이 끝난 뒤 되돌아가 서식을 적용하면 텍스트는 그대로 일반 글자로 남고
+    빈 인용구 블록만 새로 생긴다. 따라서 소제목은 순서를 반대로 해서, 먼저
+    _apply_quotation_line로 인용구(버티컬 라인) 블록을 연 뒤 그 안에 텍스트를
+    타이핑한다.
 
     .se-section-text locator를 한 번만 잡아 루프 내내 재사용하지 않고 매번
     _current_text_section(frame)으로 새로 조회한다 — 이미지를 삽입하면 네이버
@@ -144,12 +228,22 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     _current_text_section(frame).click()
 
     local_image_paths = [img.path for img in parsed.images if img.is_local]
-    heading_texts: list[str] = []
     link_urls: list[str] = []
     # 이번 실행에서 새로 타이핑할 LINK_PLACEHOLDER보다 앞서 문서에 이미 존재하는
     # 개수. 플레이스홀더 텍스트가 모든 링크에서 동일하므로, 텍스트만으로는 어떤
     # 인스턴스인지 구분할 수 없어 이 개수를 기준으로 nth() 인덱스를 계산한다.
     existing_link_count = frame.get_by_text(LINK_PLACEHOLDER, exact=True).count()
+
+    # 하이라이트도 링크와 같은 이유로 지연 처리한다: (phrase, occurrence_index) 목록만
+    # 모아두고, 실제 배경색 적용은 본문 타이핑이 전부 끝난 뒤 한 번에 한다.
+    # occurrence_index는 "이 문구가 지금까지 .se-section-text에 타이핑된 텍스트 중
+    # 몇 번째로 등장하는가"이며, highlight_running_text(지금까지 타이핑된 순수
+    # 텍스트를 그대로 이어붙인 문자열)에서 phrase.count()로 계산한다 — 나중에
+    # _HIGHLIGHT_RANGE_RECT_JS가 실제 DOM을 같은 방식(등장 순서 카운트)으로 훑으므로
+    # 인덱스가 일치한다. 소제목(인용구) 텍스트는 .se-section-text가 아닌 별도
+    # 컴포넌트에 들어가 검색 대상이 아니므로 running_text에 포함하지 않는다.
+    highlight_requests: list[tuple[str, int]] = []
+    highlight_running_text = ""
 
     for line in parsed.body_lines:
         stripped = line.strip()
@@ -167,25 +261,102 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
             upload_image(frame, resolved_path)
         elif line.startswith(HEADING_PREFIX):
             _current_text_section(frame).press("Enter")
-            heading_text = line[len(HEADING_PREFIX) :]
+            heading_text = HIGHLIGHT_MARKER_PATTERN.sub(r"\1", line[len(HEADING_PREFIX) :])
+            _apply_quotation_line(frame)
             _current_text_section(frame).type(heading_text, delay=TYPE_DELAY_MS)
-            heading_texts.append(heading_text)
-            _current_text_section(frame).press("Enter")
+            _exit_quotation_block(frame)
             frame.owner.page.wait_for_timeout(HEADING_SAFETY_DELAY_MS)
             continue
         elif md_link_match or bare_url_match:
             url = md_link_match.group(1) if md_link_match else bare_url_match.group(1)
             _current_text_section(frame).type(LINK_PLACEHOLDER, delay=TYPE_DELAY_MS)
             link_urls.append(url)
+            highlight_running_text += LINK_PLACEHOLDER
         else:
-            _current_text_section(frame).type(line, delay=TYPE_DELAY_MS)
+            clean_line, highlight_running_text = _consume_highlight_markers(
+                line, highlight_running_text, highlight_requests
+            )
+            _current_text_section(frame).type(clean_line, delay=TYPE_DELAY_MS)
         _current_text_section(frame).press("Enter")
-
-    for heading_text in heading_texts:
-        _apply_subheading_style(frame, heading_text)
 
     for index, url in enumerate(link_urls):
         _apply_link(frame, existing_link_count + index, url)
+
+    for phrase, occurrence_index in highlight_requests:
+        _apply_highlight(frame, phrase, occurrence_index)
+
+
+def _consume_highlight_markers(
+    line: str, running_text: str, highlight_requests: list[tuple[str, int]]
+) -> tuple[str, str]:
+    """줄 안의 `**문구**`를 모두 벗겨 순수 텍스트로 만들고, HIGHLIGHT_MAX_COUNT개까지만
+    (phrase, occurrence_index)를 highlight_requests에 기록한다.
+
+    occurrence_index는 running_text(지금까지 타이핑된 텍스트를 이어붙인 문자열,
+    이 줄에서 이미 처리한 앞부분 포함)에서 phrase가 몇 번 등장했는지를 셈해서 구한다
+    — _HIGHLIGHT_RANGE_RECT_JS가 실제 DOM을 같은 "등장 순서" 기준으로 찾으므로 이
+    인덱스가 그대로 대응된다.
+    """
+    parts: list[str] = []
+    last_end = 0
+    for match in HIGHLIGHT_MARKER_PATTERN.finditer(line):
+        before = line[last_end : match.start()]
+        phrase = match.group(1)
+        parts.append(before)
+        parts.append(phrase)
+        running_text += before
+        if len(highlight_requests) < HIGHLIGHT_MAX_COUNT:
+            highlight_requests.append((phrase, running_text.count(phrase)))
+        running_text += phrase
+        last_end = match.end()
+    tail = line[last_end:]
+    parts.append(tail)
+    running_text += tail
+    return "".join(parts), running_text
+
+
+def _apply_highlight(frame: Any, phrase: str, occurrence_index: int) -> None:
+    """본문에서 phrase의 occurrence_index번째(0-based) 등장 위치에 배경색(노란색)을 적용한다.
+
+    input_body가 본문 전체 타이핑을 다 끝낸 뒤에만 호출한다(이유는 input_body의
+    docstring 참조 — "다음 입력 서식 오염" 문제를 피하기 위함. 실측으로도 확인했다:
+    Shift+화살표로 선택 후 배경색을 적용하고 커서를 이동해 이어서 타이핑하면 그
+    다음 텍스트까지 배경색을 물려받았다).
+
+    JS(_HIGHLIGHT_RANGE_RECT_JS)로는 대상 문구의 화면 좌표만 얻고, 실제 텍스트 선택은
+    Playwright의 실제 마우스 드래그로 만든다 — Range/Selection을 JS로만 설정하면
+    네이버 에디터의 선택 동기화 로직이 갱신되지 않아 배경색 버튼이 아무 효과가
+    없었다(라이브 디버깅으로 확인).
+    """
+    page = frame.owner.page
+    try:
+        rect = frame.locator("body").evaluate(
+            f"(el, [phrase, idx]) => ({_HIGHLIGHT_RANGE_RECT_JS})(phrase, idx)",
+            [phrase, occurrence_index],
+        )
+        if rect is None:
+            print(f"경고: 하이라이트 대상 텍스트를 찾지 못함({phrase!r}), 강조 없이 넘어갑니다.", file=sys.stderr)
+            return
+
+        mainframe_box = page.locator("#mainFrame").bounding_box()
+        if mainframe_box is None:
+            print(f"경고: 에디터 프레임 위치를 확인할 수 없어 하이라이트를 건너뜁니다({phrase!r}).", file=sys.stderr)
+            return
+
+        start_x = mainframe_box["x"] + rect["startX"]
+        start_y = mainframe_box["y"] + rect["startY"]
+        end_x = mainframe_box["x"] + rect["endX"]
+        end_y = mainframe_box["y"] + rect["endY"]
+        page.mouse.move(start_x, start_y)
+        page.mouse.down()
+        page.mouse.move((start_x + end_x) / 2, start_y, steps=3)
+        page.mouse.move(end_x, end_y, steps=3)
+        page.mouse.up()
+
+        frame.locator(BACKGROUND_COLOR_BUTTON_SELECTOR).click(timeout=HIGHLIGHT_TIMEOUT_MS)
+        frame.locator(HIGHLIGHT_COLOR_SWATCH_SELECTOR).first.click(timeout=HIGHLIGHT_TIMEOUT_MS)
+    except Exception:
+        print(f"경고: 하이라이트 적용 실패({phrase!r}), 강조 없이 일반 텍스트로 남습니다.", file=sys.stderr)
 
 
 def _current_text_section(frame: Any) -> Any:
@@ -197,44 +368,37 @@ def _current_text_section(frame: Any) -> Any:
     return frame.locator(".se-section-text").last
 
 
-def _apply_quotation_bubble(frame: Any) -> None:
-    """상단 인용구 드롭다운을 열어 "인용구 3"(말풍선형, quotation_bubble)을 선택한다.
+def _apply_quotation_line(frame: Any) -> None:
+    """상단 인용구 드롭다운을 열어 "인용구 2"(버티컬 라인형, quotation_line)를 선택한다.
 
     실측 DOM(사용자 제공)에 정확히 맞춘 선택자를 쓴다: 트리거 버튼(QUOTATION_TRIGGER_SELECTOR)을
-    클릭해 옵션 목록을 연 뒤, data-value="quotation_bubble"인 option 버튼을 클릭한다.
+    클릭해 옵션 목록을 연 뒤, data-value="quotation_line"인 option 버튼을 클릭한다.
     """
     frame.locator(QUOTATION_TRIGGER_SELECTOR).first.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
-    frame.locator(QUOTATION_BUBBLE_OPTION_SELECTOR).click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+    frame.locator(QUOTATION_LINE_OPTION_SELECTOR).click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
 
 
-def _apply_subheading_style(frame: Any, heading_text: str) -> None:
-    """이미 입력이 끝난 소제목 문단에 커서를 두고 "인용구 3"(말풍선형) 서식을 적용한다.
+def _exit_quotation_block(frame: Any) -> None:
+    """방금 텍스트를 입력한 인용구 컴포넌트를 벗어나 일반 문단으로 돌아간다.
 
-    input_body가 본문 전체 타이핑을 다 끝낸 뒤에만 이 함수를 호출한다. 타이핑 중간에
-    바로 서식을 적용하는 방식은 두 가지 실측 버그가 있었다: (1) 타이핑 직후 에디터
-    내부 렌더링이 안정되기 전에 서식 조작을 하면 레이스 컨디션으로 그 줄 자체가
-    삭제되는 경우가 있었고, (2) 서식 적용 직후 커서의 "다음 입력 서식"이 그대로 남아
-    이어서 타이핑하는 본문까지 소제목 서식을 물려받았다.
-
-    인용구 서식은 (글자 크기/굵게와 달리) 텍스트를 선택하지 않고 문단 안에 커서만
-    있어도 해당 블록 전체에 적용되는 블록 단위 서식이다(실측 확인). 그래서 문단
-    텍스트를 한 번만 클릭해 커서를 둔 뒤 인용구 드롭다운에서 옵션을 선택한다. 동일
-    텍스트가 이전 실행에서 누적돼 여러 개 있을 수 있으므로 .last(가장 최근에 입력된
-    것)를 쓴다.
+    인용구 컴포넌트의 bounding box 바로 아래(마진 QUOTATION_EXIT_CLICK_MARGIN_PX)의
+    빈 영역을 마우스로 클릭한다 — 라이브 디버깅으로 확인한 유일하게 동작하는 방법
+    (Enter 키로는 컴포넌트를 못 벗어난다). 클릭한 지점에 새 "본문" 문단이 생기고,
+    이후 타이핑하는 텍스트는 인용구 서식을 물려받지 않는다.
     """
-    try:
-        target = frame.get_by_text(heading_text, exact=True).last
-        target.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
-        _apply_quotation_bubble(frame)
-    except Exception:
-        print(f"경고: 소제목 스타일 적용 실패({heading_text!r}), 일반 글자로 남습니다.", file=sys.stderr)
+    box = frame.locator(QUOTATION_COMPONENT_SELECTOR).last.bounding_box()
+    if box is None:
+        return
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] + QUOTATION_EXIT_CLICK_MARGIN_PX
+    frame.owner.page.mouse.click(x, y)
 
 
 def _apply_link(frame: Any, index: int, url: str) -> None:
     """index번째 LINK_PLACEHOLDER("[링크 클릭]") 문단을 url로 연결된 하이퍼링크로 바꾼다.
 
     input_body가 본문 전체 타이핑을 다 끝낸 뒤에만 이 함수를 호출한다(이유는
-    _apply_subheading_style 참조 — 서식 적용 직후 "다음 입력 서식"이 뒤에 오는
+    input_body의 docstring 참조 — 서식 적용 직후 "다음 입력 서식"이 뒤에 오는
     텍스트에 번지는 문제를 피하기 위함).
 
     플레이스홀더 텍스트가 모든 링크에서 동일해 텍스트만으로는 어떤 인스턴스인지
