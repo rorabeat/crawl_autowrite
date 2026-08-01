@@ -1564,3 +1564,276 @@ c:\Users\d2njj\Downloads\20260720_225609.png 참고하여 저장된 태스크 �
 확인 버튼을 누르면돼 
 <button type="button" class="se-popup-button se-popup-button-confirm" disabled="" data-log="pog.ok"><span class="se-popup-button-text">확인</span></button>
 
+
+**AI 처리 요약:** 3개의 커밋으로 분리 완료했습니다.  1. `✨ feat: 대기열 추가 시 저장된 태스크 목록에서 자동 제거` — `app.py`, `tests/test_job_queue.py` 2. `✨ feat: 네이버 에디터 소제목을 인용구 스타일로, 링크를 하이퍼링크로 변경` — `NaverAutoWri
+
+## 2026-07-31 21:58:48 - 사용자 프롬프트
+
+[Image #2] 새 태스크 등록시 태스크를 일괄 생성할수 있는 기능을 만들고 싶어 키워드를 줄로 구분하여 여러개를 입력하고[Image #3] 생성하기 버튼을 누르면 동시에 생성이 되고 자동으로 대기중으로 이동했으면 좋겠어 셋팅값은 동일하게 일괄 적용하게 하고 싶어 계획 작성해줘 ultrathink
+
+
+**AI 처리 요약:** 코드 조사가 진행 중입니다. 결과가 오면 이를 바탕으로 계획을 정리하겠습니다. 
+
+## 2026-07-31 22:00:35 - 사용자 프롬프트
+
+<task-notification>
+<task-id>a96261f077152c51b</task-id>
+<tool-use-id>toolu_01QPjE6xSxasRgK6p21m4TCz</tool-use-id>
+<output-file>C:\Users\d2njj\AppData\Local\Temp\claude\C--gitRepo-crawl-autowrite\bc187e61-8f99-4511-a6ce-1167dd53cc64\tasks\a96261f077152c51b.output</output-file>
+<status>completed</status>
+<summary>Agent "태스크 생성/대기열 로직 조사" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Now I have all the pieces needed. Let me check line 431-434 label/keyword auto-fill logic once more, and confirm the InputTab equivalent for comparison (not strictly required but useful context already captured).
+
+Based on this investigation, here is my report.
+
+## 조사 결과
+
+### 1. "새 태스크" 다이얼로그 구현 위치
+
+**`C:\gitRepo\crawl_autowrite\app.py`** — `class TaskEditDialog(QDialog)` (375~523행)
+
+- `task=None`으로 생성하면 창 제목이 "새 태스크", `task` 객체를 넘기면 "태스크 편집" (386행)
+- 필드 구성:
+  - 태스크 이름: `QLineEdit` (`self.label_edit`, 389행), placeholder "태스크 이름(비우면 키워드로 자동 표시)"
+  - 키워드: `QLineEdit` (`self.keyword_edit`, 392행)
+  - 크롤링 사용: `QCheckBox` (`self.use_crawling_checkbox`, 395행)
+  - AI 실행기/모델: `QComboBox` (`self.ai_model_combo`, 398행), 항목은 `config.AI_MODEL_CHOICES`에서 채움
+  - AI 실사 이미지 생성: `QCheckBox` (`self.generate_images_checkbox`, 404행) + 장수 `QSpinBox` (`self.image_gen_count_spin`, 범위 1~10, 407행)
+  - AGENTS.md 경로: `QLabel` + "찾아보기"/"기본값 사용" `QPushButton` (414~421행), `self.agents_md_path`에 경로 문자열 보관 (None이면 기본값)
+  - 네이버 로그인 수동: `QCheckBox` (`self.manual_login_checkbox`, 423행)
+  - comment: `QTextEdit` (`self.comment_edit`, 426행, 높이 고정 5줄)
+  - 이미지 목록: `ImageDropList`(`image_input.py`, `QListWidget` 상속) 인스턴스 `self.image_drop_list` (435행), "이미지 초기화" `QPushButton`
+  - 버튼: `QDialogButtonBox`(Ok/Cancel) (461행), Ok는 `_on_accept`에 연결되어 키워드 미입력 시 경고 후 막음 (481~485행)
+
+### 2. OK 클릭 시 태스크 생성/저장
+
+- `_on_accept`(481행)에서 키워드 필수 검증 후 `self.accept()`
+- `get_task_item()`(508~523행)이 다이얼로그 필드값으로 **`pipeline.py`의 `TaskItem` dataclass**(53~74행)를 생성해 반환
+- 호출부는 `MultiTaskTab._on_new_task`(1253~1256행): `TaskEditDialog(None, self)` 실행 후 accept면 `self.task_manager.add(dialog.get_task_item())`
+- `TaskManager.add()`(`app.py` 580~582행)가 인메모리 리스트 `self.tasks`에 append 후 `_persist()` → `pipeline.save_tasks(self.tasks)`가 **`config.TASKS_JSON_PATH`(`_WORK_ROOT / "tasks.json"`, config.py 292행)에 JSON으로 원자적 저장**(tmp 파일 write 후 `Path.replace`, pipeline.py 110~121행)
+- 편집 시엔 `task_manager.update(task_id, ...)`(584~589행)이 동일 id 항목을 교체 후 다시 저장
+
+### 3. 저장된 태스크 / 진행 중 / 대기 중 자료구조
+
+- **저장된 태스크**: `TaskManager(QObject)` (`app.py` 564~611행) — `self.tasks: list[TaskItem]`, 시작 시 `pipeline.load_tasks()`로 `tasks.json` 로드, 변경마다 `changed` 시그널 발행 + `pipeline.save_tasks()`로 디스크 반영. CRUD: `add`, `update`, `remove`, `move`(순서 변경)
+- **진행 중/대기 중**: `JobQueueManager(QObject)` (`app.py` 645~700행+)
+  - `self._current: QueuedJob | None` — 진행 중 작업 1개
+  - `self._pending: list[QueuedJob]` — 대기 중 작업 큐(FIFO)
+  - `QueuedJob` dataclass (635~642행): `job_id, label, context: PipelineContext, status`
+  - **태스크를 "대기 중"으로 이동시키는 메서드**: `JobQueueManager.enqueue(context, label)`(665~671행) — `QueuedJob` 생성해 `self._pending`에 append하고 `_start_next_if_idle()` 호출(현재 진행 중인 게 없으면 즉시 시작, 있으면 대기)
+  - `remove_pending(job_id)`(679~691행)로 대기 중 작업만 취소 가능(진행 중인 것은 취소 불가)
+  - UI 측 트리거: `MultiTaskTab._on_enqueue_selected`(1280행), `_on_enqueue_all`(1291행)이 `TaskItem.to_pipeline_context()`(pipeline.py 76~87행)로 변환해 `job_queue.enqueue()` 호출
+
+### 4. 대기열 추가 시 저장된 목록에서 자동 제거 (커밋 `1a51e88`)
+
+`app.py` 1280~1298행, `MultiTaskTab`:
+
+```python
+def _on_enqueue_selected(self) -&gt; None:
+    ...
+    job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+    self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+    # 대기열로 넘어간 태스크는 "저장된 태스크" 목록에서 제거한다 — 진행중/대기중으로
+    # 넘어간 뒤에도 저장 목록에 남아 있으면 중복 실행 오인이나 혼동을 일으키기 쉽다.
+    self.task_manager.remove(task.task_id)
+
+def _on_enqueue_all(self) -&gt; None:
+    ...
+    for task in list(self.task_manager.tasks):
+        job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+        ...
+        self.task_manager.remove(task.task_id)
+```
+
+즉 "대기열에 추가"/"전체 대기열에 추가" 둘 다 큐 등록 직후 `task_manager.remove()`를 호출해 저장된 목록에서 지운다. 이미 구현되어 있는 기능이다.
+
+### 5. 태스크 이름 자동 표시(키워드로) 로직
+
+`TaskEditDialog.__init__` 431~433행 + `_on_label_changed`/`_on_keyword_edited`(487~493행):
+
+```python
+self._keyword_manually_edited = task is not None and task.keyword != task.label
+self.label_edit.textChanged.connect(self._on_label_changed)
+self.keyword_edit.textEdited.connect(self._on_keyword_edited)
+...
+def _on_label_changed(self, text: str) -&gt; None:
+    if self._keyword_manually_edited:
+        return
+    self.keyword_edit.setText(text)
+
+def _on_keyword_edited(self, _text: str) -&gt; None:
+    self._keyword_manually_edited = True
+```
+
+그리고 실제 "저장 시" 최종 이름 확정은 `get_task_item()`(508~510행)에서:
+```python
+keyword = self.keyword_edit.text().strip()
+label = self.label_edit.text().strip() or keyword
+```
+즉 저장 시점에 `label`이 비어 있으면 `keyword`로 대체된다. 다만 다이얼로그가 열려 있는 동안의 실시간 동기화 로직(`_on_label_changed`)은 반대 방향(라벨 입력 시 키워드가 아직 수동 편집되지 않았다면 라벨 텍스트를 키워드로 따라 채움)으로 작동한다는 점은 참고할 부분(UI 문구가 말하는 "비우면 키워드로 자동 표시"는 실질적으로 `get_task_item()`의 `label = ... or keyword` 한 줄이 담당).
+
+### 6. 이미지 목록 필드의 태스크별 독립성
+
+- `ImageDropList`(`image_input.py` 19~73행)는 매 다이얼로그 생성 시 `self.image_drop_list = ImageDropList()`(app.py 435행)로 **새 인스턴스**를 만들고, `self.image_paths: list[str] = []`도 인스턴스별 새 리스트(26행)이므로 다이얼로그 간 위젯/리스트 공유는 없음
+- 편집 모드일 때만 `image_drop_list.load_images(task.image_paths)`(437행)로 해당 태스크의 경로를 채움 — `load_images`는 내부에서 `clear_images()` 먼저 호출 후 하나씩 `_add_image`로 다시 채우므로 원본 `task.image_paths` 리스트 객체를 그대로 참조하지 않음
+- 저장 시 `get_task_item()`의 516행 `image_paths=list(self.image_drop_list.image_paths)`로 **얕은 복사본**을 만들어 `TaskItem`에 담음
+- `TaskItem.image_paths`는 `field(default_factory=list)`(pipeline.py 67행)로 dataclass 인스턴스마다 독립된 리스트가 기본값이 되도록 되어 있어, 여러 `TaskItem` 간 리스트 객체 공유 문제(파이썬 mutable default 함정)는 없음
+- 결론: 이미지 목록은 위젯 레벨(각 다이얼로그 인스턴스 독립), 데이터 레벨(`TaskItem.image_paths` 복사/독립 필드) 양쪽에서 이미 태스크별로 분리되어 있으며, 공유되는 코드 경로는 발견되지 않음(실제 파일 복사는 `image_input.py` 주석대로 파이프라인 실행 시점 `PostResult/&lt;날짜_제목&gt;/images/`로 이뤄짐 — `pipeline.py`의 `run_pipeline` 쪽 로직, 이번 조사 범위 밖이지만 참고용으로 명시)
+
+### 관련 커밋 히스토리
+- `bfc166b` 태스크 저장/관리 및 태스크별 AGENTS.md·이미지 생성 개수 지정 기능 추가 (TaskItem/TaskManager/tasks.json 최초 도입으로 추정)
+- `727581b` 이미지 생성 개수 지정·재배치·codex exec 통합 및 태스크 UI 개선 (`move()`, image_gen_count 관련)
+- `1a51e88` 대기열 추가 시 저장된 태스크 목록에서 자동 제거 (`_on_enqueue_selected`/`_on_enqueue_all`의 `task_manager.remove()` 호출 추가)</result>
+<usage><subagent_tokens>41184</subagent_tokens><tool_uses>16</tool_uses><duration_ms>90003</duration_ms></usage>
+</task-notification>
+
+
+**AI 처리 요약:** 키워드를 그대로 태스크 이름으로 쓰는 방식으로 확정하겠습니다. 이제 구현을 진행할까요, 아니면 계획만 확정하고 마무리할까요? 
+
+## 2026-07-31 22:03:13 - 사용자 프롬프트
+
+응
+
+
+**AI 처리 요약:** 구현 완료했습니다.  **변경 내용** (`app.py`): - 새 태스크 다이얼로그에만 "여러 키워드 일괄 생성(줄바꿈으로 구분)" 체크박스 추가 → 체크 시 키워드 입력이 여러 줄 텍스트박스로 전환되고, 태스크 이름 필드는 비활성화(각 �
+
+## 2026-07-31 22:05:11 - 사용자 프롬프트
+
+응
+
+
+**AI 처리 요약:** 모든 로직이 예상대로 동작합니다.  **검증 결과** (offscreen Qt 환경에서 직접 위젯 테스트): - 새 태스크 다이얼로그: 일괄 체크박스 표시됨, 체크 시 키워드 단일입력 숨겨지고 다중 텍스트박스로 전환(반대도 정상) - 편집 다이
+
+## 2026-07-31 22:13:24 - 사용자 프롬프트
+
+ign in again.
+22:12:50 I 2026-07-31T13:12:50.170550Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://chatgpt.com/backend-api/codex/responses
+22:12:50 I 2026-07-31T13:12:50.171991Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed becauseyour refresh token was revoked. Please log out and sign in again.
+22:12:50 I 2026-07-31T13:12:50.172694Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed becauseyour refresh token was revoked. Please log out and sign in again.
+22:12:50 I 2026-07-31T13:12:50.173228Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed becauseyour refresh token was revoked. Please log out and sign in again.
+22:12:50 I 2026-07-31T13:12:50.251966Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://chatgpt.com/backend-api/codex/responses
+22:12:50 I ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.
+22:12:50 I 2026-07-31T13:12:50.269594Z ERROR codex_login::auth:
+
+
+**AI 처리 요약:** 터미널에서 아래 명령을 직접 실행해 주세요(대화형 로그인이라 `!` 접두사로 직접 실행하셔야 합니다):  ``` ! codex login ```  브라우저 인증 창이 뜨면 ChatGPT 계정으로 재로그인하시면 됩니다. 완료되면 앱에서 "AI 실행기" 단계
+
+## 2026-07-31 22:39:28 - 사용자 프롬프트
+
+소제목 입력시 아래 버튼을 클릭한 다음
+<button type="button" title="" class="se-document-toolbar-select-option-button se-text-icon-toolbar-select-option-button __se-sentry" data-group="documentToolbar" data-type="icon-select" data-name="quotation" aria-expanded="false" aria-haspopup="true"><span class="se-toolbar-label" aria-hidden="true">인용구 선택</span><span class="se-toolbar-tooltip">인용구 선택</span></button>
+
+
+버티컬 라인 기능을 선택해줘
+<button type="button" title="" class="__se-sentry se-toolbar-option-icon-button se-toolbar-option-insert-quotation-quotation_line-button" data-group="documentToolbar" data-name="quotation" data-role="option" data-value="quotation_line" data-type="icon-select" data-log="dot.quota1" aria-current="false"><span class="se-toolbar-tooltip">인용구 2</span></button>
+
+그리고 아래에 소제목을 입력하게 해줘
+<span class="se-placeholder __se_placeholder se-ff-nanumbarungothic se-fs19 se-placeholder-focused">내용을 입력하세요.</span>
+
+
+**AI 처리 요약:** **변경 내용** (`NaverAutoWrite/editor.py`): - 소제목 스타일 옵션 셀렉터를 `data-value="quotation_bubble"`("인용구 3" 말풍선형) → `data-value="quotation_line"`("인용구 2" 버티컬 라인형)으로 교체 - `QUOTATION_BUBBLE_OPTION_SELECTOR` → `QUOTATION_LINE_OPTION_SE
+
+## 2026-08-01 08:50:43 - 사용자 프롬프트
+
+소제목 표시가 제대로 안돼고 있어 원인 파악해줘
+
+
+**AI 처리 요약:** `editor.py`와 `history.md` 기록을 대조해서 원인을 찾았습니다.  ## 원인  **`_apply_subheading_style`가 "인용구"를 잘못된 방식으로 적용하고 있습니다.**  현재 코드(`NaverAutoWrite/editor.py:210-230`)의 흐름은: 1. 소제목 텍스트를 **일반 텍�
+
+## 2026-08-01 08:53:14 - 사용자 프롬프트
+
+확인해봐
+
+
+**AI 처리 요약:** 아직 차단되어 있습니다(`This site is not allowed due to safety restrictions`). 확장 프로그램에서 권한을 허용하는 절차가 완료되지 않았거나, 반영에 시간이 걸리는 것 같습니다.  확인해 주실 사항: 1. Chrome 툴바의 Claude in Chrome 확장 아�
+
+## 2026-08-01 08:56:06 - 사용자 프롬프트
+
+1. Chrome 툴바의 Claude in Chrome 확장 아이콘을 클릭 → blog.naver.com 접근 허용 설정이 있는지 확인 ---- 이거 어떻게 하는거야?
+
+
+**AI 처리 요약:** Claude in Chrome 확장 프로그램의 사이트 권한 설정 방법을 안내해 드릴게요.  1. **Chrome 브라우저 우측 상단 툴바**에서 Claude(안스로픽 로고) 확장 아이콘을 찾아 클릭합니다.    - 아이콘이 안 보이면 툴바의 퍼즐 조각 모양(확장 �
+
+## 2026-08-01 09:00:58 - 사용자 프롬프트
+
+[Image #1]
+
+
+**AI 처리 요약:** 여전히 차단됩니다 — 확장 프로그램 설정 문제가 아니라 Claude in Chrome 자체의 안전 정책상 이 사이트(로그인이 필요한 사이트로 분류된 것으로 추정)가 막혀 있는 것으로 보입니다. 이 부분은 사용자 설정으로 우회할 수 없습니
+
+## 2026-08-01 09:02:06 - 사용자 프롬프트
+
+가설이 틀렸어  인용구 이용후 텍스트를 입려해야 돼
+
+
+**AI 처리 요약:** `app.py`의 "멀티 작업" 탭에 진행 중 작업용 프로그레스 바를 추가했습니다.  ## 변경 내용 - `MultiTaskTab`의 "진행 중 작업" 영역에 `QProgressBar`를 추가 — 파이프라인 4단계(크롤링/AI 생성/이미지 생성/발행) 중 완료된 단계 수를 기�
+
+## 2026-08-01 09:21:46 - 사용자 프롬프트
+
+S C:\gitRepo\crawl_autowrite> & c:/gitRepo/crawl_autowrite/.venv/Scripts/python.exe c:/gitRepo/crawl_autowrite/app.py
+09:20:33 I ImageDropList 초기화됨
+09:20:33 I agents_editor.load_agents_md: C:\gitRepo\crawl_autowrite\PostResult\AGENTS.md (1960자)
+09:20:34 I MainWindow 초기화 완료: 5개 탭 생성
+09:21:00 I 진행 상황: md 파싱 완료 (title='AGENTS.md — 블로그 글 작성 지침')
+09:21:00 I 크롬 프로필 재사용(로그인 완료 이력 있음): C:\gitRepo\crawl_autowrite\NaverAutoWrite\.naver_session
+09:21:00 I 기존 크롬 프로세스에 연결합니다: http://127.0.0.1:9333
+09:21:00 I 진행 상황: 에디터 진입 완료
+09:21:00 I Traceback (most recent call last):
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 101, in <module>
+09:21:00 I     sys.exit(main())
+09:21:00 I              ~~~~^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 82, in main
+09:21:00 I     editor.input_body(frame, parsed, base_dir=Path(args.md).resolve().parent)
+09:21:00 I     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\editor.py", line 176, in input_body
+09:21:00 I     _apply_quotation_line(frame)
+09:21:00 I     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\editor.py", line 212, in _apply_quotation_line
+09:21:00 I     frame.locator(QUOTATION_LINE_OPTION_SELECTOR).click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+09:21:00 I     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\sync_api\_generated.py", line 17672, in click
+09:21:00 I     self._sync(
+09:21:00 I     ~~~~~~~~~~^
+09:21:00 I         self._impl_obj.click(
+09:21:00 I         ^^^^^^^^^^^^^^^^^^^^^
+09:21:00 I     ...<10 lines>...
+09:21:00 I         )
+09:21:00 I         ^
+09:21:00 I     )
+09:21:00 I     ^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+09:21:00 I     return task.result()
+09:21:00 I            ~~~~~~~~~~~^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_locator.py", line 163, in click
+09:21:00 I     return await self._frame._click(self._selector, strict=True, **params)
+09:21:00 I            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_frame.py", line 591, in _click
+09:21:00 I     await self._channel.send("click", self._timeout, locals_to_params(locals()))
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+09:21:00 I     return await self._connection.wrap_api_call(
+09:21:00 I            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+09:21:00 I     ...<3 lines>...
+09:21:00 I     )
+09:21:00 I     ^
+09:21:00 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+09:21:00 I     raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+09:21:00 I playwright._impl._errors.TimeoutError: Locator.click: Timeout 3000ms exceeded.
+09:21:00 I Call log:
+09:21:00 I   - waiting for locator("#mainFrame").content_frame.locator("[data-group=\"documentToolbar\"][data-name=\"quotation\"][data-role=\"option\"][data-value=\"quotation_line\"]")
+09:21:00 I
+
+
+**AI 처리 요약:** 자동화 브라우저 창이 아직 열려 있는지 확인해봐 주시겠어요? (스크립트는 크래시했지만 Playwright가 띄운 크롬 창 자체는 그대로 남아있을 가능성이 높습니다.) 열려 있다면 그 창에서 지금 커서가 있는 문단 근처에 "인용구 선�
+
+## 2026-08-01 09:24:17 - 사용자 프롬프트
+
+다시 테ㅡ트 해봐
+
+
+**AI 처리 요약:** 변경 사항을 반영하고 오프스크린 Qt 테스트로 동작을 검증했습니다.  ## 변경 내용 (`app.py` - `TaskEditDialog`) - "새 태스크" 다이얼로그를 열 때, "AI 실사 이미지 생성" 체크박스/장수가 더 이상 고정값(체크됨/3장)이 아니라 **직전�
+
+## 2026-08-01 10:39:36 - 사용자 프롬프트
+
+/git:commit
+
