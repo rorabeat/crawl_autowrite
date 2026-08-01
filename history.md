@@ -1837,3 +1837,10 @@ S C:\gitRepo\crawl_autowrite> & c:/gitRepo/crawl_autowrite/.venv/Scripts/python.
 
 /git:commit
 
+
+**AI 처리 요약:** 오늘 세션의 변경사항을 3개 커밋으로 나눠서 완료했습니다:  1. **🐛 fix** — 소제목 인용구 서식 미적용 버그 수정 (`NaverAutoWrite/editor.py`) 2. **✨ feat** — 진행률 프로그레스바 + 태스크 이미지 설정값 기억 기능 (`app.py`) 3. **�
+
+## 2026-08-01 10:41:14 - 사용자 프롬프트
+
+커밋
+
