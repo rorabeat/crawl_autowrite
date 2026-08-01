@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -392,6 +393,15 @@ class TaskEditDialog(QDialog):
         self.keyword_edit = QLineEdit(task.keyword if task is not None else "")
         self.keyword_edit.setPlaceholderText("키워드")
 
+        self.bulk_mode_checkbox = QCheckBox("여러 키워드 일괄 생성(줄바꿈으로 구분)")
+        self.bulk_mode_checkbox.setVisible(task is None)
+        self.bulk_mode_checkbox.toggled.connect(self._on_bulk_mode_toggled)
+
+        self.bulk_keyword_edit = QTextEdit()
+        self.bulk_keyword_edit.setPlaceholderText("한 줄에 키워드 하나씩 입력")
+        self.bulk_keyword_edit.setFixedHeight(self.bulk_keyword_edit.fontMetrics().lineSpacing() * 5 + 16)
+        self.bulk_keyword_edit.setVisible(False)
+
         self.use_crawling_checkbox = QCheckBox("크롤링 사용")
         self.use_crawling_checkbox.setChecked(task.use_crawling if task is not None else True)
 
@@ -401,15 +411,27 @@ class TaskEditDialog(QDialog):
         idx = self.ai_model_combo.findData(task.ai_model if task is not None else "codex:gpt-5.6-sol")
         self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
+        # 새 태스크를 만들 때는(task is None) 직전에 저장했던 이미지 생성 설정값을
+        # 기본값으로 띄운다 — 매번 켜기/장수를 다시 고르는 게 번거롭다는 요청(사용자
+        # 확인). InputTab과 같은 input_defaults.json을 공유해서 "마지막으로 쓴 값"
+        # 하나로 통일한다. 태스크 편집(task is not None)은 그 태스크 자신의 저장된
+        # 값을 그대로 쓴다 — 기존 동작 유지.
+        image_defaults = pipeline.load_input_defaults()
         self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
-        self.generate_images_checkbox.setChecked(task.generate_images if task is not None else True)
+        self.generate_images_checkbox.setChecked(
+            task.generate_images if task is not None else image_defaults.generate_images
+        )
 
         self.image_gen_count_spin = QSpinBox()
         self.image_gen_count_spin.setRange(1, 10)
-        self.image_gen_count_spin.setValue(task.image_gen_count if task is not None else 3)
+        self.image_gen_count_spin.setValue(
+            task.image_gen_count if task is not None else image_defaults.image_gen_count
+        )
         self.image_gen_count_spin.setSuffix("장")
         self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
         self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.generate_images_checkbox.toggled.connect(self._save_image_defaults)
+        self.image_gen_count_spin.valueChanged.connect(self._save_image_defaults)
 
         self.agents_md_path: str | None = task.agents_md_path if task is not None else None
         self.agents_md_label = QLabel(
@@ -459,6 +481,8 @@ class TaskEditDialog(QDialog):
         agents_md_row.addWidget(self.agents_md_reset_button)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        if task is None:
+            button_box.button(QDialogButtonBox.StandardButton.Ok).setText("생성하기")
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
 
@@ -467,6 +491,8 @@ class TaskEditDialog(QDialog):
         layout.addWidget(self.label_edit)
         layout.addWidget(QLabel("키워드"))
         layout.addWidget(self.keyword_edit)
+        layout.addWidget(self.bulk_mode_checkbox)
+        layout.addWidget(self.bulk_keyword_edit)
         layout.addWidget(self.use_crawling_checkbox)
         layout.addLayout(ai_model_row)
         layout.addLayout(generate_images_row)
@@ -478,8 +504,41 @@ class TaskEditDialog(QDialog):
         layout.addWidget(button_box)
         self.resize(480, 520)
 
+    def _on_bulk_mode_toggled(self, checked: bool) -> None:
+        self.keyword_edit.setVisible(not checked)
+        self.bulk_keyword_edit.setVisible(checked)
+        self.label_edit.setDisabled(checked)
+        self.label_edit.setPlaceholderText(
+            "일괄 생성 시 각 태스크 이름은 키워드로 자동 지정됩니다" if checked
+            else "태스크 이름(비우면 키워드로 자동 표시)"
+        )
+
+    def _bulk_keywords(self) -> list[str]:
+        seen: set[str] = set()
+        keywords: list[str] = []
+        for line in self.bulk_keyword_edit.toPlainText().splitlines():
+            keyword = line.strip()
+            if not keyword or keyword in seen:
+                continue
+            seen.add(keyword)
+            keywords.append(keyword)
+        return keywords
+
     def _on_accept(self) -> None:
-        if not self.keyword_edit.text().strip():
+        if self.bulk_mode_checkbox.isChecked():
+            keywords = self._bulk_keywords()
+            if not keywords:
+                QMessageBox.warning(self, "태스크 편집", "키워드를 한 줄에 하나씩 입력해주세요.")
+                return
+            if len(keywords) > 50:
+                reply = QMessageBox.question(
+                    self,
+                    "태스크 편집",
+                    f"키워드가 {len(keywords)}개입니다. 한 번에 대기열에 추가하시겠습니까?",
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        elif not self.keyword_edit.text().strip():
             QMessageBox.warning(self, "태스크 편집", "키워드를 입력해주세요.")
             return
         self.accept()
@@ -505,22 +564,41 @@ class TaskEditDialog(QDialog):
         self.agents_md_path = None
         self.agents_md_label.setText("AGENTS.md: 기본값(PostResult/AGENTS.md)")
 
+    def _save_image_defaults(self) -> None:
+        """이미지 생성 사용 여부/장수를 input_defaults.json에 저장해 다음 "새 태스크"에도
+        같은 값이 기본으로 뜨게 한다. agents_md_path/ai_model 등 다른 필드는 InputTab이
+        관리하는 값 그대로 보존한다."""
+        defaults = pipeline.load_input_defaults()
+        defaults.generate_images = self.generate_images_checkbox.isChecked()
+        defaults.image_gen_count = self.image_gen_count_spin.value()
+        pipeline.save_input_defaults(defaults)
+
+    def _shared_task_kwargs(self) -> dict:
+        return {
+            "comment": self.comment_edit.toPlainText(),
+            "image_paths": list(self.image_drop_list.image_paths),
+            "use_crawling": self.use_crawling_checkbox.isChecked(),
+            "generate_images": self.generate_images_checkbox.isChecked(),
+            "image_gen_count": self.image_gen_count_spin.value(),
+            "agents_md_path": self.agents_md_path,
+            "login_mode": "manual" if self.manual_login_checkbox.isChecked() else "auto",
+            "ai_model": self.ai_model_combo.currentData(),
+        }
+
     def get_task_item(self) -> TaskItem:
         keyword = self.keyword_edit.text().strip()
         label = self.label_edit.text().strip() or keyword
-        return TaskItem(
-            task_id=self._task_id,
-            label=label,
-            keyword=keyword,
-            comment=self.comment_edit.toPlainText(),
-            image_paths=list(self.image_drop_list.image_paths),
-            use_crawling=self.use_crawling_checkbox.isChecked(),
-            generate_images=self.generate_images_checkbox.isChecked(),
-            image_gen_count=self.image_gen_count_spin.value(),
-            agents_md_path=self.agents_md_path,
-            login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
-            ai_model=self.ai_model_combo.currentData(),
-        )
+        return TaskItem(task_id=self._task_id, label=label, keyword=keyword, **self._shared_task_kwargs())
+
+    def get_task_items(self) -> list[TaskItem]:
+        """일괄 모드면 키워드마다 별도 TaskItem을, 아니면 단일 TaskItem 1개를 반환한다."""
+        if not self.bulk_mode_checkbox.isChecked():
+            return [self.get_task_item()]
+        shared = self._shared_task_kwargs()
+        return [
+            TaskItem(task_id=pipeline.new_task_id(), label=keyword, keyword=keyword, **shared)
+            for keyword in self._bulk_keywords()
+        ]
 
 
 class AgentsEditorTab(QWidget):
@@ -1161,6 +1239,11 @@ class MultiTaskTab(QWidget):
         super().__init__(parent)
         self.job_queue = job_queue
         self.task_manager = task_manager
+        # 진행 중 작업의 파이프라인 단계(크롤링/생성/이미지생성/발행) 진행률 계산용 —
+        # job_step 시그널로 완료된(= status != "running") 단계 이름이 들어올 때마다
+        # 채워서 프로그레스바 값을 갱신한다. 작업이 바뀌면 비운다.
+        self._current_job_id: int | None = None
+        self._finished_steps: set[str] = set()
 
         self.task_list = QListWidget()
         self.new_task_button = QPushButton("새 태스크")
@@ -1193,6 +1276,12 @@ class MultiTaskTab(QWidget):
         self.current_list = QListWidget()
         self.current_list.setMaximumHeight(60)
 
+        self.current_progress = QProgressBar()
+        self.current_progress.setRange(0, len(RunLogTab.STEP_NAMES))
+        self.current_progress.setValue(0)
+        self.current_progress.setFormat("%v/%m 단계 (%p%)")
+        self.current_progress.setTextVisible(True)
+
         self.pending_list = QListWidget()
         self.delete_pending_button = QPushButton("선택한 대기 작업 삭제")
         self.delete_pending_button.clicked.connect(self._on_delete_pending)
@@ -1206,6 +1295,7 @@ class MultiTaskTab(QWidget):
         layout.addLayout(task_button_row)
         layout.addWidget(QLabel("진행 중 작업"))
         layout.addWidget(self.current_list)
+        layout.addWidget(self.current_progress)
         layout.addWidget(QLabel("대기 중 작업"))
         layout.addWidget(self.pending_list)
         layout.addWidget(self.delete_pending_button)
@@ -1252,8 +1342,17 @@ class MultiTaskTab(QWidget):
 
     def _on_new_task(self) -> None:
         dialog = TaskEditDialog(None, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dialog.bulk_mode_checkbox.isChecked():
             self.task_manager.add(dialog.get_task_item())
+            return
+        # 일괄 생성분은 "저장된 태스크"를 거치지 않고 바로 대기열로 보낸다 — 여러 개를
+        # 저장 목록에 쌓아두고 다시 "전체 대기열에 추가"를 누르게 하는 건 이 기능의
+        # 목적(한 번에 만들고 바로 대기중으로)과 어긋난다.
+        for task in dialog.get_task_items():
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
 
     def _on_edit_task(self) -> None:
         task = self._selected_task()
@@ -1302,6 +1401,15 @@ class MultiTaskTab(QWidget):
         current = self.job_queue.current_job()
         if current is not None:
             self.current_list.addItem(f"작업 #{current.job_id}: {current.label} ({current.status})")
+            if current.job_id != self._current_job_id:
+                # 새 작업이 시작됨 — 이전 작업의 완료 단계 기록을 비우고 0%부터 다시 센다.
+                self._current_job_id = current.job_id
+                self._finished_steps = set()
+                self.current_progress.setValue(0)
+        else:
+            self._current_job_id = None
+            self._finished_steps = set()
+            self.current_progress.setValue(0)
 
         self.pending_list.clear()
         for job in self.job_queue.pending_jobs():
@@ -1323,6 +1431,12 @@ class MultiTaskTab(QWidget):
     def _on_job_step(self, job_id: int, name: str, status: str) -> None:
         label = RunLogTab.STEP_LABELS.get(name, name)
         self.log_view.append(f"[작업 #{job_id}] {label}: {status}")
+
+        # status가 "running"이면 그 단계가 아직 진행 중이라는 뜻이라 진행률에 반영하지
+        # 않고, 단계가 끝난(success/failed/skipped/reused) 시점에만 완료로 센다.
+        if job_id == self._current_job_id and status != "running":
+            self._finished_steps.add(name)
+            self.current_progress.setValue(len(self._finished_steps))
 
     def _on_job_done(self, job_id: int, result: dict) -> None:
         failed = any(step.get("status") == "failed" for step in result.get("steps", {}).values())
