@@ -2,6 +2,13 @@
 # GUI 프레임워크: docs/PRD.md 7절 "GUI 프레임워크 미확정" 항목에서 PySide6로 결정
 PySide6>=6.11.0
 
+# Claude 백엔드용 이미지 처리: Claude에는 codex의 $imagegen 같은 이미지 생성 도구가 없어
+# 대신 Claude가 찾은 실제 이미지 URL을 다운로드해서 정사각형으로 크롭한다(image_fetch.py).
+# requests는 다른 패키지(google-api-core 등)의 전이 의존성으로 이미 깔려 있었지만 직접
+# 사용하므로 명시한다.
+requests>=2.31.0
+Pillow>=10.0.0
+
 # 테스트
 pytest>=8.0.0
 pytest-qt>=4.5.0

@@ -65,7 +65,7 @@ def test_build_generation_prompt_truncates_over_limit(monkeypatch, tmp_path):
     blog_file.write_text("가" * 200, encoding="utf-8")
 
     context = pipeline.PipelineContext(keyword="키워드")
-    prompt = pipeline._build_generation_prompt(context, [blog_file])
+    prompt = pipeline._build_generation_prompt(context, [blog_file], "codex")
 
     blog_section = prompt.split("참고 크롤링 결과:\n")[1]
     assert len(blog_section) == 50
@@ -75,17 +75,30 @@ def test_build_generation_prompt_includes_web_search_instruction(monkeypatch):
     monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
 
     context = pipeline.PipelineContext(keyword="반도체주가")
-    prompt = pipeline._build_generation_prompt(context, [])
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
 
     assert "웹 검색" in prompt
     assert "최신 정보" in prompt
+
+
+def test_build_generation_prompt_forbids_clarifying_questions(monkeypatch):
+    """AGENTS.md 페르소나(여행)와 주제(주식 등)가 안 맞을 때 AI가 글을 쓰지 않고 되묻기만
+    해서 제목 없는 md가 생성되던 실사례가 있었다 — 무인 실행이라 질문에 답할 수 없으니
+    항상 완성된 글을 바로 쓰라고 명시해야 한다."""
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="삼성전자 주가 하락 이유")
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
+
+    assert "확인 질문" in prompt
+    assert "무인" in prompt
 
 
 def test_build_generation_prompt_includes_image_instruction_when_generate_images_on(monkeypatch):
     monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
 
     context = pipeline.PipelineContext(keyword="키워드", generate_images=True, image_gen_count=2)
-    prompt = pipeline._build_generation_prompt(context, [])
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
 
     assert "$imagegen" in prompt
     assert "정확히 2장" in prompt
@@ -97,9 +110,90 @@ def test_build_generation_prompt_omits_image_instruction_when_generate_images_of
     monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
 
     context = pipeline.PipelineContext(keyword="키워드", generate_images=False)
-    prompt = pipeline._build_generation_prompt(context, [])
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
 
     assert "$imagegen" not in prompt
+
+
+def test_build_generation_prompt_uses_placeholder_instruction_for_claude_backend(monkeypatch):
+    """claude 백엔드는 $imagegen 도구가 없어 자리표시자+URL 매핑 지시를 대신 써야 한다
+    (사용자 리포트: 클로드 하이쿠 사용 시 이미지가 안 나옴)."""
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="키워드", generate_images=True, image_gen_count=2)
+    prompt = pipeline._build_generation_prompt(context, [], "claude")
+
+    assert "$imagegen" not in prompt
+    assert "[IMAGE 1]" in prompt
+    assert "정확히 2개" in prompt
+
+
+def test_extract_and_apply_claude_images_replaces_placeholders(tmp_path, monkeypatch):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    md_path = work_dir / "제목.md"
+    md_path.write_text(
+        "# 제목\n\n본문 [IMAGE 1] 이어지는 문장.\n\n[IMAGE 1] https://example.com/photo.jpg | 풍경 사진\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        pipeline.image_fetch,
+        "download_and_crop_square",
+        lambda url, dest: (dest.parent.mkdir(parents=True, exist_ok=True), dest.write_bytes(b"jpg"), True)[-1],
+    )
+
+    result_paths = pipeline._extract_and_apply_claude_images(work_dir, md_path, 1)
+
+    content = md_path.read_text(encoding="utf-8")
+    assert "[IMAGE 1] https://example.com/photo.jpg" not in content
+    assert "![풍경 사진](images/claude_1.jpg)" in content
+    assert len(result_paths) == 1
+    assert result_paths[0].name == "claude_1.jpg"
+
+
+def test_extract_and_apply_claude_images_removes_placeholder_on_download_failure(tmp_path, monkeypatch):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    md_path = work_dir / "제목.md"
+    md_path.write_text(
+        "# 제목\n\n본문 [IMAGE 1] 이어지는 문장.\n\n[IMAGE 1] https://example.com/broken.jpg | 실패\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(pipeline.image_fetch, "download_and_crop_square", lambda url, dest: False)
+
+    result_paths = pipeline._extract_and_apply_claude_images(work_dir, md_path, 1)
+
+    content = md_path.read_text(encoding="utf-8")
+    assert "[IMAGE 1]" not in content
+    assert result_paths == []
+
+
+def test_extract_and_apply_claude_images_downloads_stray_remote_links_too(tmp_path, monkeypatch):
+    """claude가 [IMAGE n] 자리표시자 지시를 어기고 원격 URL을 직접 마크다운 이미지로
+    써버려도(사용자 리포트: "이미지는 링크만 가져오는 게 아니라 다운로드해서 크롭해야"),
+    코드가 그 링크까지 찾아 다운로드+크롭해서 로컬 파일로 바꿔야 한다."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    md_path = work_dir / "제목.md"
+    md_path.write_text(
+        "# 제목\n\n본문 ![오사카 성](https://example.com/osaka.jpg) 이어지는 문장.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        pipeline.image_fetch,
+        "download_and_crop_square",
+        lambda url, dest: (dest.parent.mkdir(parents=True, exist_ok=True), dest.write_bytes(b"jpg"), True)[-1],
+    )
+
+    result_paths = pipeline._extract_and_apply_claude_images(work_dir, md_path, 1)
+
+    content = md_path.read_text(encoding="utf-8")
+    assert "https://example.com/osaka.jpg" not in content
+    assert "![오사카 성](images/claude_extra_1.jpg)" in content
+    assert len(result_paths) == 1
 
 
 def test_run_generation_creates_images_in_same_codex_call_when_enabled(tmp_path, monkeypatch):

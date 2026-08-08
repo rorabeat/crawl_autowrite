@@ -82,7 +82,6 @@ def test_claude_exec_args_use_permission_mode_and_model():
         "Read,Write,Edit,WebSearch,WebFetch",
         "--max-turns",
         "40",
-        "--bare",
     ]
 
 

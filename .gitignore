@@ -35,6 +35,15 @@ tasks.json.tmp
 input_defaults.json
 input_defaults.json.tmp
 
+# 대기열 상태(사용자별 로컬 실행 상태)
+queue_state.json
+
+# GetImage(이미지 검색) 서브 프로젝트의 API 키(시크릿)
+GetImage/.env
+
+# PowerPoint 임시 잠금 파일
+~$*.pptx
+
 # Claude Code 로컬 전용 설정/락 파일(팀 공유용 settings.json은 추적)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

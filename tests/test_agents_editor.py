@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 
 import agents_editor
 import app
+import config
 
 
 def test_load_and_save_agents_md_roundtrip(tmp_path):
@@ -21,8 +22,8 @@ def test_agents_editor_tab_loads_original_content(qtbot, tmp_path, monkeypatch):
     path = tmp_path / "AGENTS.md"
     path.write_text("원본 내용", encoding="utf-8")
 
-    monkeypatch.setattr(agents_editor, "load_agents_md", lambda: path.read_text(encoding="utf-8"))
-    monkeypatch.setattr(agents_editor, "save_agents_md", lambda content: path.write_text(content, encoding="utf-8"))
+    monkeypatch.setattr(config, "list_agents_md_files", lambda: [path])
+    monkeypatch.setattr(config, "AGENTS_MD_PATH", path)
 
     tab = app.AgentsEditorTab()
     qtbot.addWidget(tab)
@@ -34,8 +35,8 @@ def test_agents_editor_tab_save_writes_file_and_cancel_restores(qtbot, tmp_path,
     path = tmp_path / "AGENTS.md"
     path.write_text("원본 내용", encoding="utf-8")
 
-    monkeypatch.setattr(agents_editor, "load_agents_md", lambda: path.read_text(encoding="utf-8"))
-    monkeypatch.setattr(agents_editor, "save_agents_md", lambda content: path.write_text(content, encoding="utf-8"))
+    monkeypatch.setattr(config, "list_agents_md_files", lambda: [path])
+    monkeypatch.setattr(config, "AGENTS_MD_PATH", path)
 
     tab = app.AgentsEditorTab()
     qtbot.addWidget(tab)

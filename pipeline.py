@@ -16,6 +16,7 @@ import uuid
 
 import agents_editor
 import config
+import image_fetch
 import subprocess_runner
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class PipelineContext:
     comment: str = ""
     image_paths: list[str] = field(default_factory=list)
     use_crawling: bool = True
+    crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     generate_images: bool = False
     image_gen_count: int = 1
     agents_md_path: str | None = None
@@ -66,6 +68,7 @@ class TaskItem:
     comment: str = ""
     image_paths: list[str] = field(default_factory=list)
     use_crawling: bool = True
+    crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     generate_images: bool = False
     image_gen_count: int = 1
     agents_md_path: str | None = None
@@ -79,6 +82,7 @@ class TaskItem:
             comment=self.comment,
             image_paths=list(self.image_paths),
             use_crawling=self.use_crawling,
+            crawl_count=self.crawl_count,
             generate_images=self.generate_images,
             image_gen_count=self.image_gen_count,
             agents_md_path=self.agents_md_path,
@@ -121,6 +125,37 @@ def save_tasks(tasks: list[TaskItem]) -> None:
     tmp_path.replace(config.TASKS_JSON_PATH)
 
 
+def load_queue_state() -> list[TaskItem]:
+    """queue_state.json을 읽어 "전체 실행" 대기열에 되돌려 넣을 TaskItem 목록을 돌려준다.
+
+    JobQueueManager가 앱 시작 시 한 번 불러와 enqueue()로 대기열에 다시 넣는다.
+    tasks.json과 같은 이유로 파일이 없거나 손상돼도 빈 목록으로 조용히 시작한다.
+    """
+    if not config.QUEUE_STATE_JSON_PATH.exists():
+        return []
+    try:
+        raw = json.loads(config.QUEUE_STATE_JSON_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("queue_state.json 파싱 실패, 빈 대기열로 시작함: %s", config.QUEUE_STATE_JSON_PATH)
+        return []
+    return [TaskItem(**item) for item in raw]
+
+
+def save_queue_state(tasks: list[TaskItem]) -> None:
+    """대기 중/진행 중 작업을 queue_state.json에 저장한다(save_tasks와 동일한 원자적 교체).
+
+    JobQueueManager가 대기열이 바뀔 때마다(추가/시작/완료) 호출해 항상 최신 상태를
+    반영한다 — 완료된 작업은 이 목록에서 빠지므로, 앱이 죽어도 "이미 끝난 작업을
+    중복 재실행"하는 일은 없다.
+    """
+    config.QUEUE_STATE_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config.QUEUE_STATE_JSON_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps([asdict(t) for t in tasks], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    tmp_path.replace(config.QUEUE_STATE_JSON_PATH)
+
+
 @dataclass
 class InputDefaults:
     """입력 탭에서 "다음 실행에도 기억할" 값(input_defaults.json으로 영속화).
@@ -132,6 +167,7 @@ class InputDefaults:
 
     generate_images: bool = False
     image_gen_count: int = 1
+    crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     agents_md_path: str | None = None
     ai_model: str = config.AI_MODEL_DEFAULT
 
@@ -176,7 +212,9 @@ def run_crawling(context: PipelineContext, work_dir: Path) -> str:
     result_root = crawler_dir / "result"
     before = set(result_root.rglob("*.txt")) if result_root.exists() else set()
 
-    args = [config.DEFAULT_INTERPRETER_CONFIG["crawler"]] + config.build_crawler_args(context.keyword)
+    args = [config.DEFAULT_INTERPRETER_CONFIG["crawler"]] + config.build_crawler_args(
+        context.keyword, count=context.crawl_count
+    )
     rc = subprocess_runner.run(args, cwd=crawler_dir)
 
     after = set(result_root.rglob("*.txt")) if result_root.exists() else set()
@@ -195,7 +233,7 @@ def _resolve_agents_md_content(context: PipelineContext) -> str:
     """작성 지침(페르소나/문체) 내용을 결정한다.
 
     context.agents_md_path가 지정돼 있으면(태스크별/입력 탭별로 다른 AGENTS.md 파일을
-    선택한 경우) 그 파일을 읽고, 없으면(기본값) PostResult/AGENTS.md를 읽는다. 지정된
+    선택한 경우) 그 파일을 읽고, 없으면(기본값) agents/AGENTS.md를 읽는다. 지정된
     파일이 삭제/이동돼 더 이상 존재하지 않으면 경고만 남기고 기본 AGENTS.md로 폴백한다
     (파이프라인 실행 자체를 막지 않는다 — tasks.json에 저장된 경로는 나중에 파일이
     사라져도 깨지지 않아야 하는 편의 데이터이기 때문).
@@ -206,6 +244,18 @@ def _resolve_agents_md_content(context: PipelineContext) -> str:
             return agents_editor.load_agents_md(custom_path)
         logger.warning("지정된 AGENTS.md 파일을 찾을 수 없어 기본값으로 대체함: %s", context.agents_md_path)
     return agents_editor.load_agents_md()
+
+
+_NO_CLARIFICATION_INSTRUCTION = (
+    "중요: 이 실행은 사람이 답할 수 없는 무인(비대화형) 단발 실행이야. 확인 질문을 하거나 "
+    "실행을 멈추지 말고, 지금 주어진 정보만으로 판단해서 완성된 블로그 글 전체를 반드시 "
+    "끝까지 작성해줘. 아래 작성 지침(AGENTS.md)의 예시 페르소나가 키워드 주제와 안 맞아 "
+    "보여도(예: 여행 페르소나인데 주식/경제 키워드인 경우) 질문으로 멈추지 말고, 문체·글 "
+    "구조·말투 규칙은 최대한 유지한 채 페르소나의 역할/관심사만 실제 키워드 주제에 맞게 "
+    "자연스럽게 바꿔서 적용해줘. 응답에는 완성된 글(제목 H1로 시작)만 담고, 그 앞뒤에 "
+    "확인 질문·안내 문구·설명을 절대 덧붙이지 마(사용자 리포트: 페르소나가 주제와 안 맞는다며 "
+    "글을 안 쓰고 되묻기만 해서 제목 없는 파일이 생성되고 발행이 실패한 사례가 있었음)."
+)
 
 
 _WEB_SEARCH_INSTRUCTION = (
@@ -227,8 +277,13 @@ _IMAGE_GENERATION_FALLBACK_BAN = (
 )
 
 
-def _build_inline_image_instruction(context: PipelineContext) -> str:
-    """글 작성과 같은 codex exec 호출 안에서 이미지도 함께 생성하도록 지시하는 문구를 만든다.
+_CLAUDE_IMAGE_PLACEHOLDER_RE = re.compile(r"\[IMAGE\s+(\d+)\]")
+_CLAUDE_IMAGE_MAPPING_RE = re.compile(r"^\[IMAGE\s+(\d+)\]\s+(\S+)\s*\|\s*(.+)$", re.MULTILINE)
+_MD_REMOTE_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
+
+
+def _build_inline_image_instruction(context: PipelineContext, backend: str) -> str:
+    """글 작성과 같은 exec 호출 안에서 이미지도 함께 준비하도록 지시하는 문구를 만든다.
 
     이전에는 글 작성(run_generation)과 이미지 생성(run_image_generation)이 codex exec를
     각각 따로 호출하는 2단계였으나(Task 016), 두 번째 호출이 응답 없이 멈추는 문제가
@@ -236,8 +291,32 @@ def _build_inline_image_instruction(context: PipelineContext) -> str:
     이번에는 이미 쓰고 있는 글 본문 안에 이미지를 바로 참조하면 되므로(별도 파일을 다시
     열어 삽입할 필요 없음), "글을 다 쓴 뒤 별도 파일을 열어 삽입"이 아니라 "쓰는 도중에
     적절한 위치에 이미지 참조를 포함시켜라"로 지시한다.
+
+    backend가 "claude"면 다른 지시를 쓴다 — claude 백엔드(--allowedTools에 Read/Write/
+    Edit/WebSearch/WebFetch만 있음, config.CLAUDE_ALLOWED_TOOLS)에는 codex의 $imagegen
+    같은 이미지 생성 도구가 없어 이 지시를 그대로 주면 아무 이미지도 만들지 않고 그냥
+    무시한다(사용자 리포트: "클로드 하이쿠로 하는 경우 이미지가 안 나옴"). 대신 AI로
+    이미지를 생성하지 말고, 어울리는 위치마다 `[IMAGE n]` 자리표시자를 넣게 하고 글 끝에
+    실제 이미지 URL 목록을 적게 해서, 다운로드+정사각형 크롭은 코드가 직접
+    처리한다(_extract_and_apply_claude_images/image_fetch.download_and_crop_square).
     """
     count = max(1, context.image_gen_count)
+    if backend == "claude":
+        return (
+            f"이미지 지시: 너에게는 이미지 생성 도구가 없으니 AI로 이미지를 새로 만들지 "
+            f"마. 대신 글을 쓰면서 사진이 어울리는 위치마다 `[IMAGE 1]`, `[IMAGE 2]` 같은 "
+            f"자리표시자를 문장 사이에 정확히 {count}개 넣어줘(1부터 순서대로, 중복 없이 "
+            f"하나씩). 글을 다 쓴 다음 맨 마지막에 빈 줄을 하나 두고, 각 번호에 어울리는 "
+            f"실제 이미지의 웹 URL을 다음 형식으로 정확히 한 줄씩 적어줘: "
+            f"`[IMAGE 번호] URL | 사진 설명 한 줄`. URL은 반드시 WebSearch/WebFetch로 실제로 "
+            f"접속해서 그 페이지 안에서 직접 확인한 이미지 주소만 써야 해 — 기억에 의존해서 "
+            f"unsplash.com 같은 스톡 사진 사이트의 `photo-영숫자ID` 형태 URL을 패턴만 맞춰 "
+            f"추측해서 만들지 마(실제로 존재하지 않는 ID라 404가 나는 경우가 많았음). "
+            f"URL 하나는 WebFetch로 접속 확인이 안 되면 그 URL은 버리고 검색으로 다른 실제 "
+            f"이미지를 찾아 대신 써줘. 자리표시자 개수와 매핑 줄 개수가 정확히 {count}개로 "
+            f"일치해야 해(코드가 이 목록으로 이미지를 내려받아 정사각형으로 잘라 자리표시자 "
+            f"자리에 끼워 넣는다)."
+        )
     return (
         f"이미지 생성 지시: $imagegen을 사용해 이 글에 어울리는 사진처럼 사실적인(실사) "
         f'정사각형(1:1) 비율 이미지를 정확히 {count}장 생성해서 반드시 "images" 폴더(현재 '
@@ -247,26 +326,28 @@ def _build_inline_image_instruction(context: PipelineContext) -> str:
     )
 
 
-def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path]) -> str:
-    """키워드/코멘트/웹 검색 지시/(이미지 생성 지시)/AGENTS.md/크롤링 결과 txt를 결합해
-    codex exec 프롬프트를 만든다.
+def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path], backend: str) -> str:
+    """키워드/코멘트/웹 검색 지시/(이미지 지시)/AGENTS.md/크롤링 결과 txt를 결합해
+    exec 프롬프트를 만든다.
 
     크롤링 결과 txt 부분은 config.PROMPT_MAX_CHARS를 초과하면 앞부분만 사용한다(리스크 M-2).
     크롤링 "미사용" 시 blog_txt_paths는 비어 있으므로 자연히 4가지(이미지/키워드/코멘트/AGENTS.md)만
     남는다. 웹 검색 지시는 가격/시세/최신 이슈처럼 시간이 지나면 바뀌는 정보를 codex가 그때그때
     검색해서 반영하도록 유도한다(사용자 요청) — AGENTS.md의 "확인 시점 명시" 캐비어트만으로는
     실제로 검색을 하지 않고 그냥 단서만 다는 경우가 있어, 검색 자체를 명시적으로 지시한다.
-    context.generate_images가 켜져 있으면 이미지 생성 지시도 같은 프롬프트에 포함해 한 번의
-    codex exec 호출로 글 작성과 이미지 생성·삽입을 함께 요청한다(사용자 요청, Task 017).
+    context.generate_images가 켜져 있으면 이미지 지시도 같은 프롬프트에 포함해 한 번의
+    exec 호출로 글 작성과 이미지 준비를 함께 요청한다(사용자 요청, Task 017). backend는
+    이미지 지시 문구를 codex/claude 중 어느 쪽에 맞출지 고르는 데만 쓴다
+    (_build_inline_image_instruction 참조).
     """
-    parts = [f"키워드: {context.keyword}"]
+    parts = [_NO_CLARIFICATION_INSTRUCTION, f"키워드: {context.keyword}"]
     if context.comment:
         parts.append(f"사용자 요청사항(반드시 반영해줘): {context.comment}")
 
     parts.append(_WEB_SEARCH_INSTRUCTION)
 
     if context.generate_images:
-        parts.append(_build_inline_image_instruction(context))
+        parts.append(_build_inline_image_instruction(context, backend))
 
     agents_md = _resolve_agents_md_content(context)
     parts.append(f"작성 지침(AGENTS.md):\n{agents_md}")
@@ -281,6 +362,66 @@ def _build_generation_prompt(context: PipelineContext, blog_txt_paths: list[Path
         parts.append(f"참고 크롤링 결과:\n{blog_text}")
 
     return "\n\n".join(parts)
+
+
+def _extract_and_apply_claude_images(work_dir: Path, md_path: Path, count: int) -> list[Path]:
+    """claude가 남긴 `[IMAGE n] URL | 설명` 매핑 줄을 읽어 이미지를 내려받고 정사각형으로
+    크롭한 뒤, 본문의 `[IMAGE n]` 자리표시자를 실제 `![설명](images/파일명)` 참조로 바꾼다.
+
+    매핑 줄 자체는 사용자에게 노출되면 안 되는 내부용 데이터이므로 최종 글에서 제거한다.
+    개별 이미지 다운로드 실패는(image_fetch.download_and_crop_square가 False 반환)
+    파이프라인 전체를 막지 않고 해당 자리표시자만 조용히 지운다 — 나머지 이미지와 글
+    본문은 그대로 살린다.
+
+    자리표시자 처리 후에도 claude가 지시를 따르지 않고 `![설명](https://...)` 같은
+    원격 이미지 링크를 본문에 직접 남겼다면(AGENTS.md/프롬프트 지시를 어긴 경우), 그
+    링크도 마저 찾아 똑같이 다운로드+정사각형 크롭해 로컬 파일로 바꾼다 — 사용자 요청:
+    "이미지는 링크만 가져오는 게 아니라 직접 다운로드해서 정사각형으로 crop"이 항상
+    보장돼야 하므로, 모델이 지시를 완벽히 지키지 않는 경우까지 코드 레벨에서 방어한다.
+    """
+    if not md_path.exists():
+        return []
+    text = md_path.read_text(encoding="utf-8")
+
+    mappings: dict[int, tuple[str, str]] = {}
+    for match in _CLAUDE_IMAGE_MAPPING_RE.finditer(text):
+        number, url, desc = int(match.group(1)), match.group(2), match.group(3).strip()
+        mappings[number] = (url, desc)
+    text = _CLAUDE_IMAGE_MAPPING_RE.sub("", text)
+
+    images_dir_path = config.images_dir(work_dir)
+    result_paths: list[Path] = []
+
+    def _replace_placeholder(match: re.Match) -> str:
+        entry = mappings.get(int(match.group(1)))
+        if entry is None:
+            return ""
+        url, desc = entry
+        dest = images_dir_path / f"claude_{match.group(1)}.jpg"
+        if not image_fetch.download_and_crop_square(url, dest):
+            return ""
+        result_paths.append(dest)
+        return f"![{desc or '관련 이미지'}](images/{dest.name})"
+
+    text = _CLAUDE_IMAGE_PLACEHOLDER_RE.sub(_replace_placeholder, text)
+
+    def _replace_remote_image(match: re.Match) -> str:
+        alt = match.group(1)
+        dest = images_dir_path / f"claude_extra_{len(result_paths) + 1}.jpg"
+        if not image_fetch.download_and_crop_square(match.group(2), dest):
+            logger.warning(
+                "_extract_and_apply_claude_images: 원격 이미지 다운로드 실패로 참조 제거 url=%s", match.group(2)
+            )
+            return ""
+        result_paths.append(dest)
+        return f"![{alt or '관련 이미지'}](images/{dest.name})"
+
+    text = _MD_REMOTE_IMAGE_RE.sub(_replace_remote_image, text)
+
+    text = re.sub(r"\n{3,}", "\n\n", text).rstrip() + "\n"
+    md_path.write_text(text, encoding="utf-8")
+
+    return result_paths[: max(1, count)]
 
 
 def _sync_agents_md_for_codex_discovery(work_dir: Path, content: str) -> None:
@@ -383,10 +524,16 @@ def run_image_generation(context: PipelineContext, work_dir: Path, md_path: Path
     backend, model = config.parse_ai_model(context.ai_model)
     if backend == "claude":
         args = config.build_claude_exec_args(model)
-        rc = subprocess_runner.run(args, cwd=work_dir, input_text=prompt, tee_path=last_message_path)
+        rc = subprocess_runner.run(
+            args,
+            cwd=work_dir,
+            input_text=prompt,
+            tee_path=last_message_path,
+            timeout=config.AI_GENERATION_TIMEOUT_SEC,
+        )
     else:
         args = config.build_codex_exec_args([], work_dir, last_message_path, model=model)
-        rc = subprocess_runner.run(args, input_text=prompt)
+        rc = subprocess_runner.run(args, input_text=prompt, timeout=config.AI_GENERATION_TIMEOUT_SEC)
 
     after_images: set[Path] = set()
     for pattern in image_extensions:
@@ -437,9 +584,13 @@ def run_generation(
     호출했는데, 두 번째 codex exec 호출이 응답 없이 멈추는 문제가 실측되어 호출 자체를 하나로
     줄였다). 이 경우 실행 전/후 work_dir 전체의 이미지 파일 스냅샷을 비교해 새로 생긴 파일만
     채택하고(run_image_generation과 동일한 방식) images/로 옮긴 뒤 세 번째 반환값으로 돌려준다.
-    generate_images가 꺼져 있으면 세 번째 반환값은 항상 빈 리스트다.
+    generate_images가 꺼져 있으면 세 번째 반환값은 항상 빈 리스트다. claude 백엔드는 이미지
+    생성 도구가 없어 대신 [IMAGE n] 자리표시자 + URL 매핑을 쓰게 하고 코드가 직접 다운로드·
+    정사각형 크롭을 수행한다(_extract_and_apply_claude_images 참조, 사용자 리포트: "클로드
+    하이쿠로 하는 경우 이미지가 안 나옴").
     """
-    prompt = _build_generation_prompt(context, blog_txt_paths)
+    backend, model = config.parse_ai_model(context.ai_model)
+    prompt = _build_generation_prompt(context, blog_txt_paths, backend)
     abs_images = [str(Path(p).resolve()) for p in context.image_paths]
 
     output_dir_path = config.output_dir(work_dir)
@@ -461,17 +612,22 @@ def run_generation(
         for pattern in image_extensions:
             before_images |= set(work_dir.rglob(pattern))
 
-    backend, model = config.parse_ai_model(context.ai_model)
     if backend == "claude":
         if abs_images:
             logger.warning(
                 "claude 백엔드는 이미지 첨부를 지원하지 않아 참고 이미지 %d장을 무시함", len(abs_images)
             )
         args = config.build_claude_exec_args(model)
-        rc = subprocess_runner.run(args, cwd=work_dir, input_text=prompt, tee_path=last_message_path)
+        rc = subprocess_runner.run(
+            args,
+            cwd=work_dir,
+            input_text=prompt,
+            tee_path=last_message_path,
+            timeout=config.AI_GENERATION_TIMEOUT_SEC,
+        )
     else:
         args = config.build_codex_exec_args(abs_images, work_dir, last_message_path, model=model)
-        rc = subprocess_runner.run(args, input_text=prompt)
+        rc = subprocess_runner.run(args, input_text=prompt, timeout=config.AI_GENERATION_TIMEOUT_SEC)
 
     title = config.safe_title(context.keyword or "제목없음")
     md_path = work_dir / f"{title}.md"
@@ -490,20 +646,23 @@ def run_generation(
 
     generated_image_paths: list[Path] = []
     if context.generate_images:
-        images_dir_path = config.images_dir(work_dir)
-        after_images: set[Path] = set()
-        for pattern in image_extensions:
-            after_images |= set(work_dir.rglob(pattern))
-        new_images = sorted(after_images - before_images, key=lambda p: p.stat().st_mtime)
-        new_images = new_images[: max(1, context.image_gen_count)]
+        if backend == "claude":
+            generated_image_paths = _extract_and_apply_claude_images(work_dir, md_path, context.image_gen_count)
+        else:
+            images_dir_path = config.images_dir(work_dir)
+            after_images: set[Path] = set()
+            for pattern in image_extensions:
+                after_images |= set(work_dir.rglob(pattern))
+            new_images = sorted(after_images - before_images, key=lambda p: p.stat().st_mtime)
+            new_images = new_images[: max(1, context.image_gen_count)]
 
-        for f in new_images:
-            if f.parent == images_dir_path:
-                generated_image_paths.append(f)
-                continue
-            dest = images_dir_path / f.name
-            shutil.copy2(f, dest)
-            generated_image_paths.append(dest)
+            for f in new_images:
+                if f.parent == images_dir_path:
+                    generated_image_paths.append(f)
+                    continue
+                dest = images_dir_path / f.name
+                shutil.copy2(f, dest)
+                generated_image_paths.append(dest)
 
     if md_path.exists():
         config.normalize_image_paths_in_md(md_path, work_dir)
@@ -530,7 +689,7 @@ def run_publish(md_path: Path, work_dir: Path, login_mode: str = "auto") -> tupl
     args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_publisher_args(
         md_path.resolve(), login_mode=login_mode
     )
-    rc = subprocess_runner.run(args, cwd=publisher_dir)
+    rc = subprocess_runner.run(args, cwd=publisher_dir, timeout=config.PUBLISH_TIMEOUT_SEC)
 
     if rc != 0:
         return "failed", None

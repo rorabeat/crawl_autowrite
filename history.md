@@ -1844,3 +1844,217 @@ S C:\gitRepo\crawl_autowrite> & c:/gitRepo/crawl_autowrite/.venv/Scripts/python.
 
 커밋
 
+
+**AI 처리 요약:** 커밋 완료했습니다. 작업 트리가 깨끗한 상태입니다. 
+
+## 2026-08-01 10:51:07 - 사용자 프롬프트
+
+링크가 본문에 그대로 표시되 
+ai 가 글을 생성후 링크를 확인해서 링크 주소를 본문에 그대로 표시하지말고 단어에 링크를 걸어줘
+
+
+**AI 처리 요약:** 두 가지 모두 확인하고 수정했습니다.  ## 1) 링크가 본문에 그대로 노출되던 문제 (`NaverAutoWrite/editor.py`) - 문장 중간/줄 전체 어디에 있든 마크다운 링크(`[텍스트](url)`)나 단독 URL을 인식하도록 확장 - 라이브 디버깅으로 **네�
+
+## 2026-08-01 13:26:47 - 사용자 프롬프트
+
+기존에 대기중이던 작업도 저장해줘 프로그램을 다시실행해도 거기서부터 진행할수있게
+
+
+**AI 처리 요약:** 두 요청 모두 구현했습니다.  ## 1) 대기 중이던 작업 저장 (`config.py`, `pipeline.py`, `app.py`) - `queue_state.json`에 대기열(대기 중 + 진행 중이던 작업)을 저장하도록 추가 - `JobQueueManager`가 작업 추가/시작/완료 등 상태가 바뀔 때마다 �
+
+## 2026-08-01 13:38:29 - 사용자 프롬프트
+
+링크가 제대로 표시되지 않고 있어 [링크 클릭] 이라고만 표시되고 실제 링크가 안돼어 있어 링크 클릭이라고 적지말고 링크의 적당한 단어로 표시하고 하이퍼 링크가 제대로 연결될수있게 다시확인해주
+
+
+## 2026-08-01 18:51:38 - 사용자 프롬프트
+
+[Image #1] 윈도우 작업표시줄에 표시되는 아이콘을 변경해줘
+
+
+**AI 처리 요약:** 앱을 백그라운드로 실행했습니다. 잠시 후 작업표시줄을 직접 확인해 주세요 — 이제 파이썬 기본 아이콘 대신 파이프라인(수집→생성→발행) 모티프의 커스텀 아이콘이 보여야 합니다.  **수정 내용 요약** - `app.py`: `main()` 시
+
+## 2026-08-01 18:52:46 - 사용자 프롬프트
+
+<task-notification>
+<task-id>b1etpw7ij</task-id>
+<tool-use-id>toolu_01P7RV2KqCRFCzht7ssEczDi</tool-use-id>
+<output-file>C:\Users\d2njj\AppData\Local\Temp\claude\C--gitRepo-crawl-autowrite\14c89860-df2e-40e1-b57e-afd216c1d36a\tasks\b1etpw7ij.output</output-file>
+<status>completed</status>
+<summary>Background command "앱을 실행해 작업표시줄 아이콘 변경을 확인" completed (exit code 0)</summary>
+</task-notification>
+
+
+**AI 처리 요약:** 앱 실행 프로세스가 정상 종료됐다는 알림입니다(exit code 0). 창을 직접 여신 뒤 닫으신 것으로 보입니다. 작업표시줄 아이콘이 의도대로 바뀌어 보였는지 확인해 주시면, 다르게 보였다면 추가로 조정하겠습니다. 
+
+## 2026-08-01 18:55:35 - 사용자 프롬프트
+
+소제목을 표시할때 소제목 표시 형식 적용 이후 텍스트가 입력되는데 그 사이의 딜레이가 없어서 글자가 누락되는 현상이 발생하고 있어 소제목 표시 형식 적용후 1초정도 딜레이 이후 텍스트를 입력하도록 수정해줘
+
+
+**AI 처리 요약:** `NaverAutoWrite/editor.py` 수정 완료했습니다.  **변경 내용** - `HEADING_FORMAT_APPLY_DELAY_MS = 1_000`(1초) 상수를 추가 - 소제목(인용구) 서식을 적용하는 `_apply_quotation_line(frame)` 호출 직후, 텍스트를 타이핑(`type()`)하기 전에 `frame.owner.page.wa
+
+## 2026-08-01 21:09:42 - 사용자 프롬프트
+
+29:50 I 공식 호텔 안내와 2026년 8월 검색 가격을 반영했으며, 2,306자로 작성했습니다. 이미지gen 내장 도구로 실사형 1:1 이미지를 정확히 1장 생성했고 본문에도 포함했습니다. 최신 정보는 [윙크호텔 공식 페이지](https://wink-hotels.com/hotel/wink-hotel-danang-centre/)와 [Trivago 검색 정보](https://www.trivago.com/en-US/oar/wink-hotel-danang-centre-da-nang?search=100-30648968)를 확인했습... (생략, 총 303자)
+20:20:40 I ImageDropList 초기화됨
+20:20:46 I ImageDropList 초기화됨
+20:27:11 I ImageDropList 초기화됨
+20:27:38 I ImageDropList 초기화됨
+20:28:23 I ImageDropList 초기화됨
+20:43:51 I ImageDropList 초기화됨
+20:44:02 I ImageDropList 초기화됨 오류인지 확인해줘
+
+
+**AI 처리 요약:** 오류가 아닙니다. `image_input.py:27`의 `logger.info("ImageDropList 초기화됨")`는 로그 레벨이 `I`(INFO)로, 위젯이 정상적으로 생성될 때마다 남기는 알림성 로그일 뿐입니다.  이 로그가 여러 번 찍힌 이유는 `ImageDropList`가 두 군데서 인스�
+
+## 2026-08-01 21:42:49 - 사용자 프롬프트
+
+[Image #3] 프로그램이 멈춰 있는것 같다 원인 확인해줘
+
+
+**AI 처리 요약:** **원인**: 작업 #5가 AI 글 작성(`generate`) 단계에서 멈춰 있습니다.  로그에 `19:29:50`에 "작성 완료했습니다"라는 codex의 답변 텍스트가 찍혔는데, 이건 codex exec가 **화면에 최종 답변을 출력한 것**일 뿐이지 **프로세스가 종료됐다�
+
+## 2026-08-01 21:45:45 - 사용자 프롬프트
+
+추가해줘
+
+
+**AI 처리 요약:** 모든 관련 테스트가 통과했습니다.  **변경 요약** - `config.py`: `AI_GENERATION_TIMEOUT_SEC = 900`(15분, codex/claude 글·이미지 생성용), `PUBLISH_TIMEOUT_SEC = 1_200`(20분, 발행용) 상수 추가 - `pipeline.py`: `run_generation`, `run_image_generation`, `run_publish`
+
+## 2026-08-02 18:14:54 - 사용자 프롬프트
+
+[Image #1] 크롤링 할 갯수를 지정하게 해주고 한번 지정하면 다음번에도 같은 값을 사용할수 있게 해줘
+
+
+**AI 처리 요약:** 크롤링 개수 지정 기능을 추가했습니다.  **변경 내용** - `pipeline.py`: `PipelineContext`/`TaskItem`/`InputDefaults`에 `crawl_count`(기본값 3) 필드 추가, `run_crawling`이 `context.crawl_count`를 크롤러 서브프로세스 `--count` 인자로 전달 - `app.py`: 입�
+
+## 2026-08-03 21:28:50 - 사용자 프롬프트
+
+exe 파일 만들어줘
+
+
+## 2026-08-03 21:31:44 - 사용자 프롬프트
+
+작업표시줄에 표시해줘
+
+
+## 2026-08-06 22:15:12 - 사용자 프롬프트
+
+프로그램이 시작하기만 하면 멀티작업에 진행중 아이템이 있는 경우 자동으로 시작하고 있어 시작 버튼을 누르면 시작하도록 변경해줘
+
+
+**AI 처리 요약:** 변경 완료했습니다.  **변경 내용** (`app.py`): 1. `JobQueueManager.enqueue()`에 `auto_start` 파라미터 추가 — `restore()`(앱 시작 시 `queue_state.json` 복원)에서는 `auto_start=False`로 호출해 대기 상태로만 채우고 즉시 실행하지 않도록 변경. UI에
+
+## 2026-08-06 22:17:52 - 사용자 프롬프트
+
+[Image #1] 글 작성을 위한 agents 폴더를 따로 만들고 거기에 글 작성용 agents.md 파일을 모아줘 그리고 파일이름이 리스트 박스에 표시되게 해서 선택하기 쉽게 인터페이스를 변경해줘
+
+
+**AI 처리 요약:** 모두 반영했습니다. 세 가지 변경 사항을 요약합니다.  **1. AGENTS.md 템플릿 폴더 분리 + 리스트 UI** - `PostResult/AGENTS.md`, `AGENTS_경제.md`, `AGENTS여행단축.md`를 새 `agents/` 폴더로 이동 (`git mv`). - `config.py`에 `AGENTS_DIR`, `list_agents_md_file
+
+## 2026-08-06 22:29:29 - 사용자 프롬프트
+
+rdyes/224183967502 하이퍼링크 걸어줘
+22:28:00 I Not logged in · Please run /login
+22:28:01 I run_generation: rc=1, md_path=C:\gitRepo\crawl_autowrite\PostResult\2026-08-06_새아커\새아커.md, status=failed, 생성된 이미지 0장
+22:28:01 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-08-06_새아커, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'failed'}, 'image_gen': {'status': 'failed'}, 'publish': {'status': 'skipped'}} 로그인 이미되어 있는데 로그인 또 해야돼?
+
+
+## 2026-08-06 22:30:42 - 사용자 프롬프트
+
+안녕
+
+
+**AI 처리 요약:** 안녕하세요! crawl_autowrite 프로젝트 작업을 도와드릴게요. 무엇을 진행할까요? 
+
+**AI 처리 요약:** 원인을 찾았습니다 — 코드 버그였습니다.  **원인**: `config.py`의 `build_claude_exec_args()`가 `claude -p` 호출에 `--bare` 옵션을 붙이고 있었는데, `claude --help`를 보면 `--bare`는 "키체인 읽기까지 건너뛰고 인증을 `ANTHROPIC_API_KEY`/`apiKeyHelper
+
+## 2026-08-06 22:31:45 - 사용자 프롬프트
+
+[Image #3] 여기에서도 멀티 작업처럼 쉽게 agents 파일을 선택하도록 ui 를 변경해줘
+
+
+**AI 처리 요약:** 모든 테스트 통과했습니다 (101 passed).  **변경 내용** (`AGENTS.md 편집` 탭): - 상단에 `agents/` 폴더의 `.md` 파일명을 나열하는 콤보박스 추가 — 멀티 작업 탭의 AGENTS.md 선택과 동일한 방식. - 콤보에서 파일을 고르면 그 파일 내용�
+
+## 2026-08-06 22:40:29 - 사용자 프롬프트
+
+작업상태에 모델명을 표시해줘 그리고 항목을 클릭하면 설정한 정보가 보이게 하고 수정할수 ㅇ
+
+
+**AI 처리 요약:** 모든 변경 사항이 반영됐고 테스트(104개) 전부 통과합니다. 요약합니다.  **1. 멀티 작업 탭 개선** - 진행 중/대기 중 작업 목록에 AI 모델명 표시 (`config.ai_model_label()` 추가). - 대기 중 작업을 더블클릭하면 태스크 편집과 동일�
+
+## 2026-08-06 22:58:08 - 사용자 프롬프트
+
+` 등)
+22:57:29 I
+22:57:29 I 현재 폴더 구조를 먼저 확인해서 관련 파일이 있는지 살펴보겠습니다.
+22:57:30 I run_generation: rc=0, md_path=C:\gitRepo\crawl_autowrite\PostResult\2026-08-06_삼전하락이유_2\삼전하락이유.md, status=success, 생성된 이미지 0장
+22:57:30 I 에러: md 파일에서 제목(H1)을 찾을 수 없습니다: C:\gitRepo\crawl_autowrite\PostResult\2026-08-06_삼전하락이유_2\삼전하락이유.md
+22:57:30 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-08-06_삼전하락이유_2, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'success'}, 'image_gen': {'status': 'failed'}, 'publish': {'status': 'failed'}}
+QThread: Destroyed while thread '' is still running
+
+(.venv) PS C:\gitRepo\crawl_autowrite> 
+
+
+**AI 처리 요약:** 원인을 하나 더 찾았습니다 — 로그를 보니 `run_generation`은 rc=0(성공)인데 md 파일에 **제목(H1)이 없어서** 발행이 실패했습니다. 실제 md 내용을 열어보니 Claude가 글을 쓰는 대신 "AGENTS.md는 여행 페르소나인데 키워드는 '삼전 하락 
+
+## 2026-08-07 21:38:24 - 사용자 프롬프트
+
+write\PostResult\2026-08-07_메르 블로그\images\claude_3.jpg (원본 400x400 → 400x400)
+21:38:06 W image_fetch.download_and_crop_square: 실패 url=https://images.unsplash.com/photo-1507842072343-583f20270319?w=400&h=400&fit=crop (404 Client Error: Not Found for url: https://images.unsplash.com/photo-1507842072343-583f20270319?w=400&h=400&fit=crop)
+21:38:06 W image_fetch.download_and_crop_square: 실패 url=https://images.unsplash.com/photo-1579621970563-430f63602d4b?w=400&h=400&fit=crop (404 Client Error: Not Found for url: https://images.unsplash.com/photo-1579621970563-430f63602d4b?w=400&h=400&fit=crop)
+21:38:06 I run_generation: rc=0, md_path=C:\gitRepo\crawl_autowrite\PostResult\2026-08-07_메르 블로그\메르 블로그.md, status=success, 생성된 이미지 1장
+
+
+**AI 처리 요약:** 방금 로그는 3장 중 2장이 404로 실패하고 1장만 성공한 사례입니다 — URL을 보면 `images.unsplash.com/photo-<ID>?w=400&h=400&fit=crop` 형태인데, Claude가 실제로 웹에서 확인한 URL이 아니라 Unsplash의 URL 패턴만 기억으로 흉내 내서 존재하지 않
+
+## 2026-08-07 21:39:42 - 사용자 프롬프트
+
+일본 관련 글에는 오키나와 오박사 홍보 링크를 항상 추가해줘 모든 agents.md 에 추가해줘
+
+
+**AI 처리 요약:** Regex correctly matches only remote URLs, leaving local `images/...` references untouched. Summary of this turn's changes:  **1. 일본 관련 홍보 링크를 모든 agents.md에 추가** - `agents/` 폴더의 4개 파일(`AGENTS.md`, `AGENTS_claude.md`, `AGENTS_경제.md`, `AGENTS여행단축.m
+
+## 2026-08-08 08:02:40 - 사용자 프롬프트
+
+멀티 작업중 대기열에 있는 것은 여러개 선택해서 한번에 설정을 변경할수 있도록 수정해줘
+
+
+## 2026-08-08 15:16:44 - 사용자 프롬프트
+
+키워드를 입력하면 글 쓰기전 또는 쓴후  관련 키워드로 이미지를 찾는 기능을 추가하고 싶어 
+인터페이스는 어떻게 수정하면 좋을지 기능은 어떻게 적용하면 좋을지 계획을 세워줘. 인터페이스 예시는 PPT 파일로 작성하고 현재 ui 기반으로 작성해줘
+
+
+**AI 처리 요약:** PPT 파일이 정상 생성됐습니다: `docs/이미지검색기능_UI설계.pptx` (8슬라이드)  ## 요약  **계획 문서**: PPT에 As-Is/To-Be 와이어프레임, 검색 결과 미리보기 UI, 파이프라인 흐름도(전/후 분기), 백엔드 모듈 설계, 구현 순서까지 8개 �
+
+## 2026-08-08 15:23:17 - 사용자 프롬프트
+
+이미지 생성 기능은 이미 있으니 그건 건드리지 말고 API 를 이용해서 이미지를 검색하는거야 이미지 수는 이미 설정 기능이 있으니 이미지 검색후 다운로드 체크 박스를 추가하면 어떨까?
+
+
+**AI 처리 요약:** 말씀하신 대로 반영하면 **전(前) 시점 검색은 기존 `ImageDropList`를 100% 재사용**할 수 있어 훨씬 깔끔해집니다. 최종 설계를 정리하면:  **InputTab UI** - "이미지 검색" 체크박스 추가 — **"AI 실사 이미지 생성"과 배타적 선택**(하나
+
+## 2026-08-08 15:28:13 - 사용자 프롬프트
+
+<task-notification>
+<task-id>bsp5kn9x2</task-id>
+<tool-use-id>toolu_01K7nDh6ubZqKDJPa9mvFBvV</tool-use-id>
+<output-file>C:\Users\d2njj\AppData\Local\Temp\claude\C--gitRepo-crawl-autowrite\6f8eb88f-8483-4824-8245-b6ea054f75f7\tasks\bsp5kn9x2.output</output-file>
+<status>completed</status>
+<summary>Background command "grep -rn "class ImageDropList" ." completed (exit code 0)</summary>
+</task-notification>
+
+
+**AI 처리 요약:** 이 알림은 이전에 백그라운드로 넘어갔던 `grep` 명령이 완료됐다는 시스템 메시지일 뿐, 사용자 응답은 아닙니다. 이미 같은 정보(`image_input.py`의 `ImageDropList`)를 직접 찾아 확인했으므로 추가로 확인할 내용은 없습니다.  앞서 �
+
+## 2026-08-08 15:30:20 - 사용자 프롬프트
+
+구현으로 고고
+
+
+## 2026-08-08 15:30:32 - 사용자 프롬프트
+
+구현전에 커밋해줘
+

@@ -66,6 +66,12 @@ CODEX_EXEC_SUBCOMMAND = "exec"
 # docs/PRD.md 7절 M-2("프롬프트 길이 상한 미확정") 관련 잠정값 — 실측 근거 없음, 확정 시 갱신 필요.
 PROMPT_MAX_CHARS = 20000
 
+# codex/claude exec 서브프로세스 응답 대기 상한(초). 글 작성 완료 후에도 자식 프로세스가
+# 종료되지 않고 멈추는 경우가 실측 확인됐다(사용자 리포트 — 진행률이 25%에서 영원히
+# 멈춤). subprocess_runner.run은 timeout 미지정 시 무기한 대기하므로, 웹 검색+이미지
+# 생성까지 포함한 충분히 넉넉한 상한을 둬서 이 경우 자동으로 "failed" 처리되게 한다.
+AI_GENERATION_TIMEOUT_SEC = 900
+
 
 # ---------------------------------------------------------------------------
 # B'. AI 글 생성 — claude CLI(`claude -p`) (사용자 요청: codex 외 Claude Sonnet도 선택 가능하게)
@@ -96,12 +102,16 @@ def build_claude_exec_args(model: str) -> list[str]:
     --sandbox workspace-write(승인 없이 작업 디렉터리 쓰기 허용)와 같은 취지다.
 
     --allowedTools/--max-turns도 같은 이유(무인 실행)로 필요하다: 승인 대기로 멈추거나
-    턴이 무한정 늘어나는 것을 막는다. --bare로 사용자의 전역 hooks/skills/MCP 자동탐색을
-    건너뛰어 오케스트레이터 실행이 로컬 claude 설정에 좌우되지 않게 한다(시작 속도도 개선).
-    --output-format은 의도적으로 지정하지 않는다 — 기본(평문) stdout을
-    subprocess_runner.run(tee_path=...)가 그대로 캡처해 codex의 --output-last-message와
-    동일하게 "최종 응답 텍스트" 폴백으로 쓰기 때문에, json으로 바꾸면 이 폴백 로직이
-    깨진다(별도 파싱 구현 전까지는 평문 유지, 사용자 확정).
+    턴이 무한정 늘어나는 것을 막는다. --output-format은 의도적으로 지정하지 않는다 —
+    기본(평문) stdout을 subprocess_runner.run(tee_path=...)가 그대로 캡처해 codex의
+    --output-last-message와 동일하게 "최종 응답 텍스트" 폴백으로 쓰기 때문에, json으로
+    바꾸면 이 폴백 로직이 깨진다(별도 파싱 구현 전까지는 평문 유지, 사용자 확정).
+
+    --bare는 쓰지 않는다: `claude --help`에 명시된 대로 --bare는 키체인 읽기까지
+    건너뛰고 인증을 ANTHROPIC_API_KEY/apiKeyHelper로만 강제해(OAuth·키체인 로그인
+    비활성화), 이 오케스트레이터처럼 API 키를 별도로 설정하지 않고 `claude login`으로
+    로그인한 환경에서는 매번 "Not logged in · Please run /login"으로 실패한다(실측
+    확인 — --bare 있음/없음으로 직접 비교, ANTHROPIC_API_KEY 미설정 상태).
     """
     return [
         CLAUDE_EXEC_COMMAND,
@@ -114,21 +124,35 @@ def build_claude_exec_args(model: str) -> list[str]:
         CLAUDE_ALLOWED_TOOLS,
         "--max-turns",
         str(CLAUDE_MAX_TURNS),
-        "--bare",
     ]
 
 
 # ---------------------------------------------------------------------------
-# AI 모델 선택 (사용자 요청): codex(GPT-5.5/GPT-5.6 Sol) 또는 Claude Sonnet 중 하나를 골라
+# AI 모델 선택 (사용자 요청): codex(GPT-5.5/GPT-5.6 Sol/Runa/Tera) 또는 Claude(Sonnet/Haiku) 중 하나를 골라
 # AI 글/이미지 생성에 사용한다. "백엔드:모델명" 형태의 문자열 하나로 인코딩해
 # InputDefaults/TaskItem/PipelineContext에 그대로 저장한다(값 하나로 백엔드+모델을 함께 관리).
 # ---------------------------------------------------------------------------
 AI_MODEL_CHOICES: list[tuple[str, str]] = [
     ("Codex · GPT-5.5", "codex:gpt-5.5"),
     ("Codex · GPT-5.6 Sol", "codex:gpt-5.6-sol"),
+    ("Codex · GPT-5.6 Runa", "codex:gpt-5.6-runa"),
+    ("Codex · GPT-5.6 Tera", "codex:gpt-5.6-tera"),
     ("Claude Sonnet", "claude:sonnet"),
+    ("Claude Haiku", "claude:haiku"),
 ]
 AI_MODEL_DEFAULT = AI_MODEL_CHOICES[0][1]
+
+
+def ai_model_label(value: str) -> str:
+    """AI_MODEL_CHOICES에서 value(예: "codex:gpt-5.6-sol")에 대응하는 표시용 라벨을 찾는다.
+
+    멀티 작업 탭에서 진행 중/대기 중 작업 목록에 모델명을 보여줄 때 쓴다(사용자 요청).
+    목록에 없는 값(예: 구버전에 저장된 값)이면 원본 문자열을 그대로 보여준다.
+    """
+    for label, choice_value in AI_MODEL_CHOICES:
+        if choice_value == value:
+            return label
+    return value
 
 
 def parse_ai_model(value: str) -> tuple[str, str]:
@@ -231,6 +255,13 @@ PUBLISHER_DIR = _WORK_ROOT / "NaverAutoWrite"
 PUBLISHER_SCRIPT = "main.py"
 PUBLISHER_ENV_VARS = ("NAVER_ID", "NAVER_PW", "NAVER_BLOG_ID", "NAVER_CATEGORY")
 
+# 발행 서브프로세스 응답 대기 상한(초). NaverAutoWrite는 CAPTCHA/2FA 감지 시 최대 5분간
+# headed 브라우저에서 수동 인증을 기다리므로(NaverAutoWrite/CLAUDE.md 참조) 그보다
+# 충분히 여유를 둔다. login_mode="manual"(사용자가 직접 로그인)을 고르면 사람이 얼마나
+# 걸릴지 알 수 없으므로, 평소보다 느리게 로그인하는 경우 이 상한에 걸려 강제 종료될 수
+# 있다는 점을 감안한 값이다(20분).
+PUBLISH_TIMEOUT_SEC = 1_200
+
 
 def build_publisher_args(
     md_path: Path,
@@ -285,7 +316,19 @@ DEFAULT_INTERPRETER_CONFIG: InterpreterConfig = {
 # ---------------------------------------------------------------------------
 POST_RESULT_ROOT = _WORK_ROOT / "PostResult"
 
-AGENTS_MD_PATH = POST_RESULT_ROOT / "AGENTS.md"
+# 글 작성용 AGENTS.md 템플릿 모음 폴더(사용자 요청: PostResult와 분리해서 관리).
+# 여러 페르소나/문체 변형(AGENTS.md, AGENTS_경제.md, AGENTS여행단축.md 등)을 이 폴더
+# 안에 모아두고, UI에서는 파일명을 나열해 고르게 한다(list_agents_md_files 참조).
+AGENTS_DIR = _WORK_ROOT / "agents"
+
+AGENTS_MD_PATH = AGENTS_DIR / "AGENTS.md"
+
+
+def list_agents_md_files() -> list[Path]:
+    """agents/ 폴더에 모아둔 AGENTS.md 템플릿 파일 목록을 이름순으로 반환한다."""
+    if not AGENTS_DIR.exists():
+        return []
+    return sorted(AGENTS_DIR.glob("*.md"), key=lambda p: p.name)
 
 # 저장된 태스크(대기열에 넣기 전 미리 만들어 둔 작업 정의) 영속화 경로. _WORK_ROOT 기준이라
 # exe로 빌드해도 exe 옆에 생긴다(사용자별 로컬 데이터라 저장소에 커밋하지 않음).
@@ -294,6 +337,12 @@ TASKS_JSON_PATH = _WORK_ROOT / "tasks.json"
 # 입력 탭의 "다음 실행에도 기억할" 기본값(AI 이미지 생성 사용 여부/개수, 커스텀 AGENTS.md
 # 경로) 영속화 경로. tasks.json과 동일한 이유로 _WORK_ROOT 기준, 저장소에 커밋하지 않음.
 INPUT_DEFAULTS_JSON_PATH = _WORK_ROOT / "input_defaults.json"
+
+# "전체 실행" 대기열(JobQueueManager)의 대기 중/진행 중 작업을 영속화하는 경로.
+# 앱이 꺼져도(또는 먹통돼서 강제 종료해도) 다음 실행 시 이 파일에서 대기열을 복원해
+# 이어서 진행할 수 있게 한다. tasks.json과 같은 이유로 _WORK_ROOT 기준, 저장소에
+# 커밋하지 않음.
+QUEUE_STATE_JSON_PATH = _WORK_ROOT / "queue_state.json"
 
 _WORK_DIR_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_(?P<title>.+?)(?:_\d+)?$")
 
