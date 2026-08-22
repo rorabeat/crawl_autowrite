@@ -16,6 +16,7 @@ def test_pipeline_context_default_instance():
         "crawl": "pending",
         "image_gen": "pending",
         "generate": "pending",
+        "image_search": "pending",
         "publish": "pending",
     }
 

@@ -61,3 +61,9 @@ python main.py --md <md파일경로> [--blog-id <id>] [--headless] [--session-fi
 
 - `.mcp.json`(루트)은 `shrimp-task-manager` MCP 서버를 등록하지만 경로가 다른 워크스페이스(`C:/gitRepo/worksapce/...`)를 가리키고 있어 이 저장소 환경에서는 그대로 쓰기 어려울 수 있다.
 - `.claude/settings.local.json`에 `npm run lint`/`npm run build`/Supabase MCP 관련 권한이 있으나, 이 저장소는 순수 Python 프로젝트이므로 해당 항목은 이 프로젝트와 무관한(다른 템플릿에서 남은) 설정이다.
+
+
+## 작업관리
+memory-bank 폴더내에 planAndTask.md 파일을 만들고 작업계획을 입력해줘
+작업계획이 이전에 진행되던 내용과 다르면 별도의 소제목으로 생성하고 신규 번호를 할당해줘 
+완료된것은 strikeout 을 표시해줘

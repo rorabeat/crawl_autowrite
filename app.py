@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -61,6 +63,7 @@ from PySide6.QtWidgets import (
 import agents_editor
 import config
 import pipeline
+from GetImage import image_search
 from image_input import ImageDropList
 from pipeline import PipelineContext, TaskItem
 
@@ -407,6 +410,42 @@ class InputTab(QWidget):
         self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
         self.image_gen_count_spin.valueChanged.connect(self._save_input_defaults)
 
+        # "AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청) — 이미지
+        # 개수는 image_gen_count_spin을 그대로 공유한다.
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(input_defaults.search_images)
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setToolTip(
+            "체크 해제 시 \"글쓰기 후\"에서는 원격 URL을 그대로 사용합니다(\"글쓰기 전\"은 로컬 파일이 "
+            "필요해 항상 다운로드합니다)."
+        )
+        self.search_download_checkbox.setChecked(input_defaults.search_images_download)
+        self.search_download_checkbox.setEnabled(input_defaults.search_images)
+        self.search_download_checkbox.toggled.connect(self._save_input_defaults)
+
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        if input_defaults.search_images_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(input_defaults.search_images)
+        self.search_timing_after_radio.setEnabled(input_defaults.search_images)
+        self.search_timing_before_radio.toggled.connect(self._on_search_timing_changed)
+
+        self.search_button = QPushButton("이미지 검색")
+        self.search_button.clicked.connect(self._on_search_images_clicked)
+        self.search_button.setEnabled(input_defaults.search_images and self.search_timing_before_radio.isChecked())
+
+        self.search_status_label = QLabel("")
+
         self.agents_md_path: str | None = input_defaults.agents_md_path
         self.agents_md_combo = QComboBox()
         _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
@@ -456,6 +495,14 @@ class InputTab(QWidget):
         generate_images_row.addWidget(self.image_gen_count_spin)
         generate_images_row.addStretch()
 
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addWidget(self.search_button)
+        search_images_row.addStretch()
+
         agents_md_row = QHBoxLayout()
         agents_md_row.addWidget(QLabel("AGENTS.md"))
         agents_md_row.addWidget(self.agents_md_combo, 1)
@@ -465,6 +512,8 @@ class InputTab(QWidget):
         layout.addWidget(self.manual_login_checkbox)
         layout.addLayout(ai_model_row)
         layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addWidget(self.search_status_label)
         layout.addLayout(agents_md_row)
         layout.addLayout(reuse_row)
         layout.addWidget(self.reuse_list)
@@ -504,13 +553,70 @@ class InputTab(QWidget):
         self.agents_md_path = self.agents_md_combo.currentData()
         self._save_input_defaults()
 
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        """"AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청)."""
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+        self.search_download_checkbox.setEnabled(checked)
+        self.search_timing_before_radio.setEnabled(checked)
+        self.search_timing_after_radio.setEnabled(checked)
+        self._update_search_button_enabled()
+        self._save_input_defaults()
+
+    def _on_search_timing_changed(self, _checked: bool) -> None:
+        self._update_search_button_enabled()
+        self._save_input_defaults()
+
+    def _update_search_button_enabled(self) -> None:
+        """검색 버튼은 "글쓰기 전" 시점에서만 쓴다 — "글쓰기 후"는 파이프라인 실행 중
+        자동으로 검색되므로 미리 누를 필요가 없다."""
+        self.search_button.setEnabled(
+            self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+        )
+
+    def _on_search_images_clicked(self) -> None:
+        """키워드로 즉시 검색·다운로드해서 결과를 image_drop_list에 추가한다("글쓰기 전" 전용).
+
+        이후 흐름(참고 이미지로 AI에 전달, work_dir/images로 복사)은 사용자가 직접 드래그
+        드롭한 이미지와 완전히 동일한 기존 경로를 그대로 탄다.
+        """
+        keyword = self.keyword_edit.text().strip()
+        if not keyword:
+            self.search_status_label.setText("이미지 검색: 키워드를 먼저 입력하세요")
+            return
+
+        count = self.image_gen_count_spin.value()
+        self.search_button.setEnabled(False)
+        self.search_button.setText("검색 중…")
+        QApplication.processEvents()
+        try:
+            saved_paths = image_search.download_search_images(keyword, count)
+        finally:
+            self.search_button.setText("이미지 검색")
+            self._update_search_button_enabled()
+
+        if not saved_paths:
+            self.search_status_label.setText(f"이미지 검색: '{keyword}' 결과 없음")
+            return
+
+        for path in saved_paths:
+            self.image_drop_list.add_image(str(path))
+        self.search_status_label.setText(f"이미지 검색: {len(saved_paths)}장 추가됨")
+
     def _save_input_defaults(self) -> None:
-        """AI 이미지 생성 사용 여부/개수, 커스텀 AGENTS.md 경로를 바꿀 때마다 즉시
-        input_defaults.json에 저장해 다음 앱 실행에도 같은 값으로 시작하게 한다."""
+        """AI 이미지 생성/이미지 검색 사용 여부·개수, 커스텀 AGENTS.md 경로를 바꿀 때마다
+        즉시 input_defaults.json에 저장해 다음 앱 실행에도 같은 값으로 시작하게 한다."""
         pipeline.save_input_defaults(
             pipeline.InputDefaults(
                 generate_images=self.generate_images_checkbox.isChecked(),
                 image_gen_count=self.image_gen_count_spin.value(),
+                search_images=self.search_images_checkbox.isChecked(),
+                search_images_download=self.search_download_checkbox.isChecked(),
+                search_images_timing="after" if self.search_timing_after_radio.isChecked() else "before",
                 crawl_count=self.crawl_count_spin.value(),
                 agents_md_path=self.agents_md_path,
                 ai_model=self.ai_model_combo.currentData(),
@@ -531,6 +637,9 @@ class InputTab(QWidget):
             crawl_count=self.crawl_count_spin.value(),
             generate_images=self.generate_images_checkbox.isChecked(),
             image_gen_count=self.image_gen_count_spin.value(),
+            search_images=self.search_images_checkbox.isChecked(),
+            search_images_download=self.search_download_checkbox.isChecked(),
+            search_images_timing="after" if self.search_timing_after_radio.isChecked() else "before",
             agents_md_path=self.agents_md_path,
             reuse_work_dir=self.selected_reuse_dir,
             login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
@@ -609,6 +718,49 @@ class TaskEditDialog(QDialog):
         self.generate_images_checkbox.toggled.connect(self._save_image_defaults)
         self.image_gen_count_spin.valueChanged.connect(self._save_image_defaults)
 
+        # "AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(InputTab과 동일 규칙).
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(
+            task.search_images if task is not None else image_defaults.search_images
+        )
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setToolTip(
+            "체크 해제 시 \"글쓰기 후\"에서는 원격 URL을 그대로 사용합니다(\"글쓰기 전\"은 로컬 파일이 "
+            "필요해 항상 다운로드합니다)."
+        )
+        self.search_download_checkbox.setChecked(
+            task.search_images_download if task is not None else image_defaults.search_images_download
+        )
+        self.search_download_checkbox.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_download_checkbox.toggled.connect(self._save_image_defaults)
+
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        search_timing = task.search_images_timing if task is not None else image_defaults.search_images_timing
+        if search_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_timing_after_radio.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_timing_before_radio.toggled.connect(self._on_search_timing_changed)
+        self.search_timing_after_radio.toggled.connect(self._save_image_defaults)
+
+        self.search_button = QPushButton("이미지 검색")
+        self.search_button.clicked.connect(self._on_search_images_clicked)
+        self.search_button.setEnabled(
+            self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+        )
+
+        self.search_status_label = QLabel("")
+
         self.agents_md_path: str | None = task.agents_md_path if task is not None else None
         self.agents_md_combo = QComboBox()
         _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
@@ -647,6 +799,14 @@ class TaskEditDialog(QDialog):
         generate_images_row.addWidget(self.image_gen_count_spin)
         generate_images_row.addStretch()
 
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addWidget(self.search_button)
+        search_images_row.addStretch()
+
         agents_md_row = QHBoxLayout()
         agents_md_row.addWidget(QLabel("AGENTS.md"))
         agents_md_row.addWidget(self.agents_md_combo, 1)
@@ -671,13 +831,15 @@ class TaskEditDialog(QDialog):
         layout.addLayout(crawling_row)
         layout.addLayout(ai_model_row)
         layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addWidget(self.search_status_label)
         layout.addLayout(agents_md_row)
         layout.addWidget(self.manual_login_checkbox)
         layout.addWidget(self.comment_edit)
         layout.addLayout(image_header_row)
         layout.addWidget(self.image_drop_list)
         layout.addWidget(button_box)
-        self.resize(480, 520)
+        self.resize(480, 620)
 
     def _on_bulk_mode_toggled(self, checked: bool) -> None:
         self.keyword_edit.setVisible(not checked)
@@ -687,6 +849,57 @@ class TaskEditDialog(QDialog):
             "일괄 생성 시 각 태스크 이름은 키워드로 자동 지정됩니다" if checked
             else "태스크 이름(비우면 키워드로 자동 표시)"
         )
+        # 일괄 생성은 키워드가 여러 개라 어떤 키워드로 검색할지 정할 수 없으므로 버튼을 끈다.
+        self.search_button.setEnabled(not checked and self._search_button_should_be_enabled())
+
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        """"AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청)."""
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+        self.search_download_checkbox.setEnabled(checked)
+        self.search_timing_before_radio.setEnabled(checked)
+        self.search_timing_after_radio.setEnabled(checked)
+        self._update_search_button_enabled()
+        self._save_image_defaults()
+
+    def _on_search_timing_changed(self, _checked: bool) -> None:
+        self._update_search_button_enabled()
+        self._save_image_defaults()
+
+    def _search_button_should_be_enabled(self) -> bool:
+        return self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+
+    def _update_search_button_enabled(self) -> None:
+        self.search_button.setEnabled(not self.bulk_mode_checkbox.isChecked() and self._search_button_should_be_enabled())
+
+    def _on_search_images_clicked(self) -> None:
+        """키워드로 즉시 검색·다운로드해서 결과를 image_drop_list에 추가한다("글쓰기 전" 전용)."""
+        keyword = self.keyword_edit.text().strip()
+        if not keyword:
+            self.search_status_label.setText("이미지 검색: 키워드를 먼저 입력하세요")
+            return
+
+        count = self.image_gen_count_spin.value()
+        self.search_button.setEnabled(False)
+        self.search_button.setText("검색 중…")
+        QApplication.processEvents()
+        try:
+            saved_paths = image_search.download_search_images(keyword, count)
+        finally:
+            self.search_button.setText("이미지 검색")
+            self._update_search_button_enabled()
+
+        if not saved_paths:
+            self.search_status_label.setText(f"이미지 검색: '{keyword}' 결과 없음")
+            return
+
+        for path in saved_paths:
+            self.image_drop_list.add_image(str(path))
+        self.search_status_label.setText(f"이미지 검색: {len(saved_paths)}장 추가됨")
 
     def _bulk_keywords(self) -> list[str]:
         seen: set[str] = set()
@@ -730,12 +943,15 @@ class TaskEditDialog(QDialog):
         self.agents_md_path = self.agents_md_combo.currentData()
 
     def _save_image_defaults(self) -> None:
-        """이미지 생성 사용 여부/장수를 input_defaults.json에 저장해 다음 "새 태스크"에도
+        """이미지 생성/검색 사용 여부·장수를 input_defaults.json에 저장해 다음 "새 태스크"에도
         같은 값이 기본으로 뜨게 한다. agents_md_path/ai_model 등 다른 필드는 InputTab이
         관리하는 값 그대로 보존한다."""
         defaults = pipeline.load_input_defaults()
         defaults.generate_images = self.generate_images_checkbox.isChecked()
         defaults.image_gen_count = self.image_gen_count_spin.value()
+        defaults.search_images = self.search_images_checkbox.isChecked()
+        defaults.search_images_download = self.search_download_checkbox.isChecked()
+        defaults.search_images_timing = "after" if self.search_timing_after_radio.isChecked() else "before"
         defaults.crawl_count = self.crawl_count_spin.value()
         pipeline.save_input_defaults(defaults)
 
@@ -747,6 +963,9 @@ class TaskEditDialog(QDialog):
             "crawl_count": self.crawl_count_spin.value(),
             "generate_images": self.generate_images_checkbox.isChecked(),
             "image_gen_count": self.image_gen_count_spin.value(),
+            "search_images": self.search_images_checkbox.isChecked(),
+            "search_images_download": self.search_download_checkbox.isChecked(),
+            "search_images_timing": "after" if self.search_timing_after_radio.isChecked() else "before",
             "agents_md_path": self.agents_md_path,
             "login_mode": "manual" if self.manual_login_checkbox.isChecked() else "auto",
             "ai_model": self.ai_model_combo.currentData(),
@@ -766,6 +985,145 @@ class TaskEditDialog(QDialog):
             TaskItem(task_id=pipeline.new_task_id(), label=keyword, keyword=keyword, **shared)
             for keyword in self._bulk_keywords()
         ]
+
+
+class BulkQueueEditDialog(QDialog):
+    """대기열에 있는 여러 작업의 공통 설정을 한 번에 바꾸는 다이얼로그(사용자 요청).
+
+    키워드/코멘트/이미지 목록처럼 작업마다 다른 값은 다루지 않는다 — 크롤링 사용 여부,
+    AI 모델, AI 실사 이미지 생성, 이미지 검색, AGENTS.md, 로그인 모드만 대상이다.
+    초기값은 선택된 작업 중 첫 번째 것으로 채우고, 확인을 누르면 선택된 모든 작업에
+    이 설정을 그대로 덮어쓴다(부분 적용이 아니라 전체 값 교체).
+    """
+
+    def __init__(self, seed: PipelineContext, count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"선택한 {count}개 작업 일괄 설정 변경")
+
+        self.use_crawling_checkbox = QCheckBox("크롤링 사용")
+        self.use_crawling_checkbox.setChecked(seed.use_crawling)
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(seed.crawl_count)
+        self.crawl_count_spin.setSuffix("건")
+        self.crawl_count_spin.setEnabled(self.use_crawling_checkbox.isChecked())
+        self.use_crawling_checkbox.toggled.connect(self.crawl_count_spin.setEnabled)
+
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        idx = self.ai_model_combo.findData(seed.ai_model)
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(seed.generate_images)
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(seed.image_gen_count)
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(seed.search_images)
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setChecked(seed.search_images_download)
+        self.search_download_checkbox.setEnabled(seed.search_images)
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        if seed.search_images_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(seed.search_images)
+        self.search_timing_after_radio.setEnabled(seed.search_images)
+        self.search_images_checkbox.toggled.connect(self.search_download_checkbox.setEnabled)
+        self.search_images_checkbox.toggled.connect(self.search_timing_before_radio.setEnabled)
+        self.search_images_checkbox.toggled.connect(self.search_timing_after_radio.setEnabled)
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.agents_md_path: str | None = seed.agents_md_path
+        self.agents_md_combo = QComboBox()
+        _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
+        self.agents_md_combo.currentIndexChanged.connect(self._on_agents_md_selected)
+
+        self.manual_login_checkbox = QCheckBox("네이버 로그인 수동으로 진행(자동 입력 안 함)")
+        self.manual_login_checkbox.setChecked(seed.login_mode == "manual")
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+
+        crawling_row = QHBoxLayout()
+        crawling_row.addWidget(self.use_crawling_checkbox)
+        crawling_row.addWidget(self.crawl_count_spin)
+        crawling_row.addStretch()
+
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
+
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(QLabel("AGENTS.md"))
+        agents_md_row.addWidget(self.agents_md_combo, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"선택한 {count}개 대기 작업에 공통으로 적용합니다.\n"
+                "(키워드/코멘트/이미지 목록은 각 작업의 값을 그대로 유지합니다)"
+            )
+        )
+        layout.addLayout(crawling_row)
+        layout.addLayout(ai_model_row)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addLayout(agents_md_row)
+        layout.addWidget(self.manual_login_checkbox)
+        layout.addWidget(button_box)
+        self.resize(440, 320)
+
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+
+    def _on_agents_md_selected(self, _index: int) -> None:
+        self.agents_md_path = self.agents_md_combo.currentData()
+
+    def apply_to(self, context: PipelineContext) -> PipelineContext:
+        """context의 키워드/코멘트/이미지/재사용 정보는 그대로 두고 공통 설정만 갈아 끼운다."""
+        context.use_crawling = self.use_crawling_checkbox.isChecked()
+        context.crawl_count = self.crawl_count_spin.value()
+        context.ai_model = self.ai_model_combo.currentData()
+        context.generate_images = self.generate_images_checkbox.isChecked()
+        context.image_gen_count = self.image_gen_count_spin.value()
+        context.search_images = self.search_images_checkbox.isChecked()
+        context.search_images_download = self.search_download_checkbox.isChecked()
+        context.search_images_timing = "after" if self.search_timing_after_radio.isChecked() else "before"
+        context.agents_md_path = self.agents_md_path
+        context.login_mode = "manual" if self.manual_login_checkbox.isChecked() else "auto"
+        return context
 
 
 class AgentsEditorTab(QWidget):
@@ -1140,8 +1498,14 @@ class RunLogTab(QWidget):
     클릭 시 _ensure_context()가 work_dir을 한 번 정하고 이후 클릭들은 이를 재사용한다.
     """
 
-    STEP_NAMES = ("crawl", "generate", "image_gen", "publish")
-    STEP_LABELS = {"crawl": "크롤링", "generate": "AI 생성", "image_gen": "이미지 생성", "publish": "발행"}
+    STEP_NAMES = ("crawl", "generate", "image_gen", "image_search", "publish")
+    STEP_LABELS = {
+        "crawl": "크롤링",
+        "generate": "AI 생성",
+        "image_gen": "이미지 생성",
+        "image_search": "이미지 검색",
+        "publish": "발행",
+    }
 
     def __init__(
         self, input_tab: InputTab, job_queue: JobQueueManager | None = None, parent: QWidget | None = None
@@ -1630,9 +1994,13 @@ class MultiTaskTab(QWidget):
         self.current_progress.setTextVisible(True)
 
         self.pending_list = QListWidget()
+        # 대기 작업 여러 개를 한 번에 선택해서 일괄 설정을 바꿀 수 있게 한다(사용자 요청).
+        self.pending_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.pending_list.itemDoubleClicked.connect(self._on_pending_item_double_clicked)
         self.delete_pending_button = QPushButton("선택한 대기 작업 삭제")
         self.delete_pending_button.clicked.connect(self._on_delete_pending)
+        self.bulk_edit_pending_button = QPushButton("선택 작업 일괄 설정 변경")
+        self.bulk_edit_pending_button.clicked.connect(self._on_bulk_edit_pending)
         # 앱 시작 시 이전에 남아있던 대기열이 복원되면(JobQueueManager.restore)
         # 자동으로 실행되지 않고 대기 상태로만 채워지므로, 사용자가 이 버튼을 눌러야
         # 실행이 시작된다. 진행 중인 작업이 있거나 대기 작업이 없으면 비활성화한다.
@@ -1642,6 +2010,10 @@ class MultiTaskTab(QWidget):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
 
+        pending_button_row = QHBoxLayout()
+        pending_button_row.addWidget(self.delete_pending_button)
+        pending_button_row.addWidget(self.bulk_edit_pending_button)
+
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("저장된 태스크(디스크에 저장됨, 앱 재시작해도 유지)"))
         layout.addWidget(self.task_list)
@@ -1649,9 +2021,9 @@ class MultiTaskTab(QWidget):
         layout.addWidget(QLabel("진행 중 작업 (더블클릭하면 설정 조회)"))
         layout.addWidget(self.current_list)
         layout.addWidget(self.current_progress)
-        layout.addWidget(QLabel("대기 중 작업 (더블클릭하면 설정 조회/수정)"))
+        layout.addWidget(QLabel("대기 중 작업 (더블클릭하면 설정 조회/수정, 여러 개 선택 후 일괄 변경 가능)"))
         layout.addWidget(self.pending_list)
-        layout.addWidget(self.delete_pending_button)
+        layout.addLayout(pending_button_row)
         layout.addWidget(self.start_pending_button)
         layout.addWidget(QLabel("진행 로그"))
         layout.addWidget(self.log_view)
@@ -1810,6 +2182,32 @@ class MultiTaskTab(QWidget):
             self.log_view.append(f"[대기 작업 삭제] 작업 #{job_id} 대기열에서 삭제됨")
         else:
             self.log_view.append(f"[대기 작업 삭제] 작업 #{job_id}을(를) 찾을 수 없습니다(이미 시작됐을 수 있음)")
+
+    def _on_bulk_edit_pending(self) -> None:
+        """대기열에서 다중 선택한 작업들의 공통 설정을 한 번에 바꾼다(사용자 요청).
+
+        키워드/코멘트/이미지 목록처럼 작업마다 다른 값은 각 작업에 저장된 값을 그대로
+        두고, 크롤링/AI 모델/이미지 생성·검색/AGENTS.md/로그인 모드만 일괄 적용한다.
+        """
+        items = self.pending_list.selectedItems()
+        if not items:
+            self.log_view.append("[일괄 설정 변경] 먼저 목록에서 대기 작업을 선택하세요(여러 개 선택 가능)")
+            return
+        job_ids = {item.data(Qt.ItemDataRole.UserRole) for item in items}
+        jobs = [j for j in self.job_queue.pending_jobs() if j.job_id in job_ids]
+        if not jobs:
+            return
+
+        dialog = BulkQueueEditDialog(jobs[0].context, len(jobs), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated_count = 0
+        for job in jobs:
+            new_context = dialog.apply_to(job.context)
+            if self.job_queue.update_pending(job.job_id, new_context, job.label):
+                updated_count += 1
+        self.log_view.append(f"[일괄 설정 변경] {updated_count}개 작업의 설정이 변경되었습니다")
 
     def _on_start_pending(self) -> None:
         if not self.job_queue.pending_jobs():

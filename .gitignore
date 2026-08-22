@@ -38,8 +38,16 @@ input_defaults.json.tmp
 # 대기열 상태(사용자별 로컬 실행 상태)
 queue_state.json
 
-# GetImage(이미지 검색) 서브 프로젝트의 API 키(시크릿)
+# 다중 네이버 계정 자격증명(평문 아이디/비밀번호 포함, config.ACCOUNTS_JSON_PATH)
+accounts.json
+accounts.json.tmp
+
+# 계정별 네이버 로그인 세션(크롬 프로필 디렉터리)
+.naver_session/
+
+# GetImage(이미지 검색) 서브 프로젝트의 API 키(시크릿) 및 다운로드 캐시
 GetImage/.env
+GetImage/_cache/
 
 # PowerPoint 임시 잠금 파일
 ~$*.pptx

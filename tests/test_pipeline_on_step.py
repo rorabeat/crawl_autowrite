@@ -39,6 +39,8 @@ def test_run_pipeline_calls_on_step_running_then_final_for_each_stage(tmp_path, 
         ("generate", "running"),
         ("generate", "success"),
         ("image_gen", "skipped"),
+        ("image_search", "running"),
+        ("image_search", "skipped"),
         ("publish", "running"),
         ("publish", "success"),
     ]

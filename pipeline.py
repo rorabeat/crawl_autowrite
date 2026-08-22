@@ -18,6 +18,7 @@ import agents_editor
 import config
 import image_fetch
 import subprocess_runner
+from GetImage import image_search
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class PipelineContext:
     crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     generate_images: bool = False
     image_gen_count: int = 1
+    search_images: bool = False
+    search_images_download: bool = True
+    search_images_timing: str = "before"
     agents_md_path: str | None = None
     work_dir: Path | None = None
     reuse_work_dir: Path | None = None
@@ -47,6 +51,7 @@ class PipelineContext:
             "crawl": "pending",
             "image_gen": "pending",
             "generate": "pending",
+            "image_search": "pending",
             "publish": "pending",
         }
     )
@@ -71,6 +76,9 @@ class TaskItem:
     crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     generate_images: bool = False
     image_gen_count: int = 1
+    search_images: bool = False
+    search_images_download: bool = True
+    search_images_timing: str = "before"
     agents_md_path: str | None = None
     login_mode: str = "auto"
     ai_model: str = config.AI_MODEL_DEFAULT
@@ -85,6 +93,9 @@ class TaskItem:
             crawl_count=self.crawl_count,
             generate_images=self.generate_images,
             image_gen_count=self.image_gen_count,
+            search_images=self.search_images,
+            search_images_download=self.search_images_download,
+            search_images_timing=self.search_images_timing,
             agents_md_path=self.agents_md_path,
             login_mode=self.login_mode,
             ai_model=self.ai_model,
@@ -167,6 +178,9 @@ class InputDefaults:
 
     generate_images: bool = False
     image_gen_count: int = 1
+    search_images: bool = False
+    search_images_download: bool = True
+    search_images_timing: str = "before"
     crawl_count: int = config.CRAWLER_COUNT_DEFAULT
     agents_md_path: str | None = None
     ai_model: str = config.AI_MODEL_DEFAULT
@@ -317,11 +331,19 @@ def _build_inline_image_instruction(context: PipelineContext, backend: str) -> s
             f"일치해야 해(코드가 이 목록으로 이미지를 내려받아 정사각형으로 잘라 자리표시자 "
             f"자리에 끼워 넣는다)."
         )
+    _, model = config.parse_ai_model(context.ai_model)
+    quality_hint = (
+        " $imagegen 호출 시 품질 옵션을 gpt-image-1 low(저품질/저비용)로 지정해줘(사용자가 "
+        "이 모델 선택 시 요청한 설정)."
+        if model in config.CODEX_LOW_QUALITY_IMAGE_MODELS
+        else ""
+    )
     return (
         f"이미지 생성 지시: $imagegen을 사용해 이 글에 어울리는 사진처럼 사실적인(실사) "
         f'정사각형(1:1) 비율 이미지를 정확히 {count}장 생성해서 반드시 "images" 폴더(현재 '
         f"작업 디렉터리 바로 아래)에 저장해줘. 그리고 글을 작성하면서 각 이미지를 흐름상 "
-        f"어울리는 위치에 `![사진 설명](images/파일명)` 형식으로 본문에 직접 포함시켜줘. "
+        f"어울리는 위치에 `![사진 설명](images/파일명)` 형식으로 본문에 직접 포함시켜줘."
+        f"{quality_hint} "
         f"{_IMAGE_GENERATION_FALLBACK_BAN}"
     )
 
@@ -678,6 +700,43 @@ def run_generation(
     return status, md_path, generated_image_paths
 
 
+def _apply_search_images_after(work_dir: Path, md_path: Path, context: PipelineContext, gen_status: str) -> str:
+    """"글쓰기 후" 시점에 키워드로 GetImage.image_search 검색을 실행해 완성된 md 끝에 삽입한다.
+
+    기존 AI 실사 이미지 생성(run_generation의 인라인 이미지 지시)과는 완전히 별개의
+    경로다 — AI가 찾은 URL이 아니라 사용자가 입력한 키워드로 공공 API(TourAPI)를 직접
+    호출해 이미지를 찾는다. 다운로드 체크가 켜져 있으면 image_fetch로 정사각형 크롭해
+    images/에 저장하고 로컬 상대경로로 삽입하며, 꺼져 있으면 원격 URL을 그대로 삽입한다.
+    "전" 시점(search_images_timing="before")은 InputTab에서 실행 전에 이미 image_paths에
+    반영되므로 여기서는 다루지 않는다. 검색 결과가 없거나 기능 자체가 꺼져 있으면 md를
+    건드리지 않고 "skipped"를 반환한다.
+    """
+    if not context.search_images or context.search_images_timing != "after":
+        return "skipped"
+    if gen_status != "success" or md_path is None or not md_path.exists():
+        return "skipped"
+
+    count = max(1, context.image_gen_count)
+    lines: list[str] = []
+
+    if context.search_images_download:
+        images_dir_path = config.images_dir(work_dir)
+        images_dir_path.mkdir(parents=True, exist_ok=True)
+        saved_paths = image_search.download_search_images(context.keyword, count, images_dir_path)
+        if not saved_paths:
+            return "failed"
+        lines = [f"![{context.keyword} 관련 이미지 {i}](images/{p.name})" for i, p in enumerate(saved_paths, start=1)]
+    else:
+        urls = image_search.search_image_urls(context.keyword, count)
+        if not urls:
+            return "failed"
+        lines = [f"![{context.keyword} 관련 이미지 {i}]({url})" for i, url in enumerate(urls, start=1)]
+
+    with md_path.open("a", encoding="utf-8") as f:
+        f.write("\n\n" + "\n\n".join(lines) + "\n")
+    return "success"
+
+
 def run_publish(md_path: Path, work_dir: Path, login_mode: str = "auto") -> tuple[str, str | None]:
     """NaverAutoWrite/main.py를 실행해 md를 네이버 블로그에 임시저장한다(바로 발행하지 않음).
 
@@ -782,6 +841,13 @@ def run_pipeline(context: PipelineContext, on_step: Callable[[str, str], None] |
     result["steps"]["image_gen"] = {"status": img_status}
     if on_step:
         on_step("image_gen", img_status)
+
+    if on_step:
+        on_step("image_search", "running")
+    search_status = _apply_search_images_after(work_dir, md_path, context, gen_status)
+    result["steps"]["image_search"] = {"status": search_status}
+    if on_step:
+        on_step("image_search", search_status)
 
     if gen_status == "success":
         if on_step:

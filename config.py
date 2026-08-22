@@ -137,9 +137,16 @@ AI_MODEL_CHOICES: list[tuple[str, str]] = [
     ("Codex · GPT-5.6 Sol", "codex:gpt-5.6-sol"),
     ("Codex · GPT-5.6 Runa", "codex:gpt-5.6-runa"),
     ("Codex · GPT-5.6 Tera", "codex:gpt-5.6-tera"),
+    ("Codex · GPT-5.6 Luna + GPT Image Low", "codex:gpt-5.6-luna"),
     ("Claude Sonnet", "claude:sonnet"),
     ("Claude Haiku", "claude:haiku"),
 ]
+
+# codex --model에 이 이름이 오면 $imagegen 지시에 "gpt-image-1 low quality" 힌트를
+# 추가한다(사용자 요청: "GPT-5.6 Luna + GPT Image Low 모델로 이미지 생성"). codex CLI에는
+# 이미지 모델/품질을 고르는 별도 플래그가 없어(실측: `codex exec --help`), 프롬프트로
+# $imagegen에 전달할 품질 옵션을 명시하는 방식으로만 제어 가능하다.
+CODEX_LOW_QUALITY_IMAGE_MODELS = ("gpt-5.6-luna",)
 AI_MODEL_DEFAULT = AI_MODEL_CHOICES[0][1]
 
 

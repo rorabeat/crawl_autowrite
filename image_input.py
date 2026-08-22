@@ -59,6 +59,10 @@ class ImageDropList(QListWidget):
         self.addItem(item)
         logger.info("이미지 추가됨: %s (총 %d장)", path, len(self.image_paths))
 
+    def add_image(self, path: str) -> None:
+        """기존 목록을 비우지 않고 이미지 한 장을 덧붙인다(예: 이미지 검색 결과 추가)."""
+        self._add_image(path)
+
     def clear_images(self) -> None:
         """드롭된 이미지 목록(썸네일 + image_paths)을 모두 비운다(새 작업 시작용)."""
         self.image_paths.clear()
