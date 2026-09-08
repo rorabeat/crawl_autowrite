@@ -47,6 +47,12 @@ _LOGIN_MARKER_NAME = ".login_ok"
 _CDP_PORT = 9333
 _CDP_READY_TIMEOUT_S = 20
 
+# connect_over_cdp의 playwright 기본 타임아웃(180초)은 "크롬을 죽여야 하는 상황"을
+# 그대로 180초 동안 블로킹시켜 버린다(실측: 아래 _connect_over_cdp_with_retry 참조).
+# 정상적인 로컬 CDP 접속은 수 초 내로 끝나므로, 좀비 상태를 빠르게 판단하기 위해 훨씬
+# 짧게 잡는다.
+_CDP_CONNECT_TIMEOUT_MS = 15_000
+
 
 def _cdp_url() -> str:
     return f"http://127.0.0.1:{_CDP_PORT}"
@@ -58,6 +64,65 @@ def _is_cdp_ready() -> bool:
         return True
     except (urllib.error.URLError, OSError):
         return False
+
+
+def _kill_chrome_process(port: int = _CDP_PORT) -> None:
+    """CDP 포트를 점유한 크롬 프로세스를 강제 종료한다(좀비 CDP 타깃 복구용).
+
+    "크롬을 계속 살려두고 재사용"하는 설계상, 이전 실행이 서브프로세스 강제종료(타임아웃/
+    취소)로 중간에 죽으면 방금 만들다 만 빈 페이지 타깃(Page.enable 등에 응답하지 않는
+    렌더러)이 크롬 안에 그대로 남을 수 있다. 이 좀비 타깃 하나 때문에 이후의 모든
+    connect_over_cdp 호출이 "ws connected"까지는 찍히고도 타임아웃 나버리므로(playwright가
+    기존 타깃 초기화 완료까지 기다린 뒤에야 반환), 연결 자체가 실패하면 크롬 프로세스를
+    통째로 재시작하는 것이 가장 확실한 복구 방법이다. netstat/taskkill은 Windows
+    전용이며(이 프로젝트는 Windows 데스크톱 앱), 이미 종료돼 있으면 조용히 넘어간다.
+    """
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        print("_kill_chrome_process: netstat 실행 실패, 건너뜀", file=sys.stderr)
+        return
+
+    pids: set[str] = set()
+    needle = f":{port}"
+    for line in result.stdout.splitlines():
+        if needle in line and "LISTENING" in line:
+            parts = line.split()
+            if parts:
+                pids.add(parts[-1])
+
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=10, check=False)
+            print(f"_kill_chrome_process: 응답 없는 크롬(PID {pid})을 종료함", file=sys.stderr)
+        except (OSError, subprocess.SubprocessError):
+            print(f"_kill_chrome_process: PID {pid} 종료 실패", file=sys.stderr)
+
+    deadline = time.monotonic() + _CDP_READY_TIMEOUT_S
+    while time.monotonic() < deadline and _is_cdp_ready():
+        time.sleep(0.3)
+
+
+def _connect_over_cdp_with_retry(playwright: Any, profile_dir: Path, headless: bool) -> Any:
+    """connect_over_cdp를 짧은 타임아웃으로 시도하고, 실패하면 크롬을 재기동해 한 번 더 시도한다.
+
+    첫 시도가 실패하는 경우는 대부분 좀비 CDP 타깃(응답 없는 렌더러) 때문이다 — 크롬
+    프로세스 자체를 죽이고 새로 띄우면(디스크의 user_data_dir은 그대로 유지되므로 로그인
+    세션은 보존된다) 대부분 해소된다. 재시도까지 실패하면 예외를 그대로 올려 호출부
+    (main.py/prelogin.py)가 기존과 동일하게 실패로 처리하게 한다.
+    """
+    try:
+        return playwright.chromium.connect_over_cdp(_cdp_url(), timeout=_CDP_CONNECT_TIMEOUT_MS)
+    except Exception as exc:
+        print(
+            f"CDP 연결 실패(좀비 크롬 프로세스로 추정) — 크롬을 재기동하고 한 번 더 시도합니다: {exc}",
+            file=sys.stderr,
+        )
+        _kill_chrome_process()
+        _launch_detached_chrome(playwright, profile_dir, headless)
+        return playwright.chromium.connect_over_cdp(_cdp_url(), timeout=_CDP_CONNECT_TIMEOUT_MS)
 
 
 def _launch_detached_chrome(playwright: Any, profile_dir: Path, headless: bool) -> None:
@@ -127,20 +192,28 @@ def create_browser_context(
     바뀌어도 로그인은 유지된다.
 
     반환값의 두 번째 항목(session_reused)으로 이전에 로그인을 완료한 적 있는
-    프로필인지 알 수 있다.
+    프로필인지 알 수 있다. 이 값은 `.login_ok` 마커 파일이 아니라, 실제로
+    nid.naver.com에 접속해봤을 때 로그인 페이지에서 벗어나는지(=리다이렉트되는지)로
+    판정한다 — 마커는 "언젠가 로그인에 성공한 적 있다"만 보장할 뿐 지금도 로그인
+    상태인지는 보장하지 않는다(세션 만료, 로그아웃, 프로필 손상 등으로 실제로는
+    로그아웃 상태인데 마커만 남아 있으면 로그인 단계를 건너뛰어 발행이 실패한다).
     """
     profile_dir = Path(session_file).parent
     profile_dir.mkdir(parents=True, exist_ok=True)
-    reused = (profile_dir / _LOGIN_MARKER_NAME).exists()
+    had_login_marker = (profile_dir / _LOGIN_MARKER_NAME).exists()
 
-    print(f"크롬 프로필 재사용(로그인 완료 이력 있음): {profile_dir}" if reused else f"신규 로그인 필요: {profile_dir}")
+    print(
+        f"크롬 프로필 재사용(로그인 완료 이력 있음): {profile_dir}"
+        if had_login_marker
+        else f"신규 로그인 필요: {profile_dir}"
+    )
 
     if _is_cdp_ready():
         print(f"기존 크롬 프로세스에 연결합니다: {_cdp_url()}")
     else:
         _launch_detached_chrome(playwright, profile_dir, headless)
 
-    browser = playwright.chromium.connect_over_cdp(_cdp_url())
+    browser = _connect_over_cdp_with_retry(playwright, profile_dir, headless)
     context = browser.contexts[0] if browser.contexts else browser.new_context(viewport={"width": 1280, "height": 800})
 
     # 크롬이 새로 뜨든(빈 새 탭) 기존 프로세스에 재연결하든, 사용자가 "크롬만 뜨고
@@ -153,6 +226,17 @@ def create_browser_context(
         page.goto(NIDLOGIN_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
     except Exception:
         pass
+
+    # goto가 (드물게) 예외로 실패하면 page.url이 새 탭의 초기값("about:blank") 등으로
+    # 남을 수 있는데, 이는 "nidlogin.login"을 포함하지 않으므로 자칫 로그인된 것으로
+    # 잘못 판정될 수 있다 — 실제로 nid.naver.com 계열 URL에 도달했을 때만 신뢰한다.
+    current_url = page.url
+    reused = bool(current_url) and "naver.com" in current_url and _left_nidlogin(current_url)
+    if had_login_marker and not reused:
+        print(
+            "로그인 완료 마커는 있지만 실제로는 로그인 상태가 아닙니다(세션 만료 등) — 재로그인을 진행합니다.",
+            file=sys.stderr,
+        )
 
     return context, reused
 

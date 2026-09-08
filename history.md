@@ -2621,3 +2621,128 @@ QThread: Destroyed while thread '' is still running
 
 커밋 푸시
 
+
+**AI 처리 요약:** 커밋 및 푸시 완료했습니다 (`505f827..077d5ba`).  - `agents/AGENTS여행단축.md` 삭제 / `agents/AGENTS여행_오키나와.md` 신규 추가는 이번 작업과 무관한(제가 만들지 않은) 변경이라 이번 커밋에서 제외했습니다 — 아직 워킹 트리에 그대로
+
+## 2026-09-09 05:08:51 - 사용자 프롬프트
+
+로필 재사용(로그인 완료 이력 있음): C:\gitRepo\crawl_autowrite\NaverAutoWrite\.naver_session\eb0d2871cea84a70a50760f2bb43711b
+03:59:56 I 기존 크롬 프로세스에 연결합니다: http://127.0.0.1:9333
+03:59:56 I Traceback (most recent call last):
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 101, in <module>
+03:59:56 I     sys.exit(main())
+03:59:56 I              ~~~~^^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 64, in main
+03:59:56 I     context, reused = naver_login.create_browser_context(
+03:59:56 I                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+03:59:56 I         playwright, args.headless, config.session_file
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\naver_login.py", line 143, in create_browser_context
+03:59:56 I     browser = playwright.chromium.connect_over_cdp(_cdp_url())
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\sync_api\_generated.py", line 16935, in connect_over_cdp
+03:59:56 I     self._sync(
+03:59:56 I     ~~~~~~~~~~^
+03:59:56 I         self._impl_obj.connect_over_cdp(
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     ...<7 lines>...
+03:59:56 I         )
+03:59:56 I         ^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+03:59:56 I     return task.result()
+03:59:56 I            ~~~~~~~~~~~^^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_browser_type.py", line 205, in connect_over_cdp
+03:59:56 I     response = await self._channel.send_return_as_dict(
+03:59:56 I                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I         "connectOverCDP", TimeoutSettings.launch_timeout, params
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 83, in send_return_as_dict
+03:59:56 I     return await self._connection.wrap_api_call(
+03:59:56 I            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 83, in send_return_as_dict
+03:59:56 I     return await self._connection.wrap_api_call(
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 83, in send_return_as_dict
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 83, in send_return_as_dict
+03:59:56 I     return await self._connection.wrap_api_call(
+03:59:56 I            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+03:59:56 I     ...<3 lines>...
+03:59:56 I     )
+03:59:56 I     ^
+03:59:56 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+03:59:56 I     raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+03:59:56 I playwright._impl._errors.TimeoutError: BrowserType.connect_over_cdp: Timeout 180000ms exceeded.
+03:59:56 I Call log:
+03:59:56 I   - <ws preparing> retrieving websocket url from http://127.0.0.1:9333
+03:59:56 I   - <ws connecting> ws://127.0.0.1:9333/devtools/browser/c0caf29b-f1b4-42fb-8dfd-1286135c6e50
+03:59:56 I   - <ws connected> ws://127.0.0.1:9333/devtools/browser/c0caf29b-f1b4-42fb-8dfd-1286135c6e50
+03:59:56 I
+03:59:56 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-09-09_넥스가드 스펙트라, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'success'}, 'image_gen': {'status': 'success'}, 'image_search': {'status': 'skipped'}, 'publish': {'status': 'failed'}}
+ 왜 자동 로그인 안되지 [Image #2] [Image #3] fable 로 확인해줘
+
+
+**AI 처리 요약:** fable 모델로 원인 진단을 맡겼습니다. 결과가 오면 바로 정리해서 알려드릴게요. 
+
+## 2026-09-09 05:14:04 - 사용자 프롬프트
+
+<task-notification>
+<task-id>aec176b27b974b73b</task-id>
+<tool-use-id>toolu_01DFBTmAZB1SRDdcrjFTCeru</tool-use-id>
+<output-file>C:\Users\d2njj\AppData\Local\Temp\claude\C--gitRepo-crawl-autowrite\0dd4c92e-62c8-4d48-8f16-0bd9e848b779\tasks\aec176b27b974b73b.output</output-file>
+<status>completed</status>
+<summary>Agent "CDP 연결 타임아웃 원인 진단" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## 진단 결과
+
+### 결론: 원인은 크롬 안에 남은 **좀비 페이지 타깃**이며, 동시 접속·락 문제가 아님
+
+현재 떠 있는 크롬(PID 26356, 02:21 기동)에 직접 확인한 사실:
+
+- `/json/list`에 페이지 타깃이 2개: `nidlogin.login`(정상)과 **`url:""`, `title:""`인 빈 페이지(389ED25B…)**.
+- 빈 타깃에 raw CDP로 `Page.enable`/`Runtime.runIfWaitingForDebugger`를 보내면 **응답 없음**(브라우저 프로세스가 처리하는 `Target.getTargetInfo`만 응답) → 렌더러가 죽었거나 영구 정지 상태.
+- 지금 다른 CDP 클라이언트(main.py/prelogin.py/node 드라이버)가 하나도 없는데도 제가 `connect_over_cdp`를 새로 시도하면 **동일하게 `&lt;ws connected&gt;` 이후 타임아웃** 재현됨.
+
+Playwright의 `connect_over_cdp`는 `Target.setAutoAttach` 뒤 **기존 모든 페이지 초기화(`Page.enable` 등)가 끝날 때까지 기다린 뒤에야** 반환하므로, 이 타깃 하나가 응답하지 않으면 새 연결이 전부 180초 타임아웃 난다. "크롬을 영원히 살려두는" 설계에서 한 번 오염된 상태가 이후 모든 발행을 실패시키는 구조다.
+
+### 가설 검토
+- **(a) 동시 CDP 연결**: 크롬은 다중 클라이언트를 허용하며, 현재 클라이언트 0개 상태에서도 재현되므로 직접 원인 아님.
+- **(b) 락이 서브프로세스에 미적용**: `pipeline.py:1028~1054`를 보면 락이 `subprocess_runner.run` 구간까지 감싸므로 `run_publish`는 prelogin 서브프로세스 종료를 실제로 기다린다. 이번 건과 무관. 다만 좀비 타깃이 생긴 경로는 (b)와 연관 가능: `subprocess_runner.run`이 취소/타임아웃 시 `proc.kill()`로 파이썬만 즉사시키면(`subprocess_runner.py:118,130`), `login()`의 `finally: page.close()`(`naver_login.py:267`)나 `main.py:97`이 실행되지 않고, 막 `Target.createTarget`된 탭이 `waitForDebuggerOnStart` 상태로 크롬에 남는다(렌더러 생성 시각 02:44:46이 이 잔재로 보임).
+- **(c) 스크린샷의 "자동 로그인 안 됨"**: `.login_ok` 마커(`eb0d…`, **08-28 생성**)가 남아 있어 prelogin/main.py 모두 `reused=True`로 `login()`을 건너뛴다(`prelogin.py:65`, `main.py:72`). 그런데 실제 프로필은 nidlogin에 머물러 있음(=로그아웃 상태). 입력란에 채워진 ID/PW는 스크립트가 아니라 **크롬 자체 비밀번호 자동완성**. 즉 마커가 프로필의 실제 로그인 상태와 어긋나 있다.
+
+### 수정 방향 제안
+1. **연결 전 건강 검사**: `create_browser_context`에서 `_is_cdp_ready()`만으로 재사용하지 말고, `/json/list`의 각 page 타깃에 짧은 타임아웃으로 `Page.enable`을 보내 응답 없는 타깃은 `/json/close/&lt;id&gt;`로 닫거나, 닫히지 않으면 크롬을 kill 후 재기동. `connect_over_cdp`에도 짧은 timeout을 주고 실패 시 kill→재기동 1회 재시도.
+2. **좀비 생성 방지**: `subprocess_runner`가 kill 전에 자식에게 정상 종료 기회(CTRL_BREAK 등)를 주거나, 종료 후 오케스트레이터가 잔여 빈 타깃을 정리.
+3. **마커 신뢰 금지**: `reused` 판단을 `.login_ok` 존재가 아니라 `page.goto(NIDLOGIN)` 후 URL이 nidlogin을 벗어났는지로 판정(리다이렉트 안 되면 `login()` 실행). 마커는 참고용으로만.
+4. **prelogin 완료 대기**(요청 사항 2): 현재 락으로 이미 직렬화되어 있어 추가 join은 불필요. 다만 `run_publish`가 prelogin 결과(rc)를 모르므로, `run_prelogin`이 결과를 `threading.Event`/공유 상태로 남기고 `run_publish`가 실패 시 kill→재로그인을 선택하게 하면 더 명확하다.</result>
+<usage><subagent_tokens>83484</subagent_tokens><tool_uses>15</tool_uses><duration_ms>233841</duration_ms></usage>
+</task-notification>
+
+
+**AI 처리 요약:** 수정 완료했습니다.  ## fable 진단 결과와 수정 내용  **fable이 밝힌 진짜 원인**: 제가 앞서 수정한 동시성 경쟁 조건이 아니라, 크롬 안에 **응답 없는 좀비 페이지 타깃**이 남아 있는 게 문제였습니다. fable이 실제로 떠 있는 크
+
+## 2026-09-09 05:38:18 - 사용자 프롬프트
+
+응
+
