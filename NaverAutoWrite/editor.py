@@ -504,8 +504,18 @@ def _apply_quotation_line(frame: Any) -> None:
     실측 DOM(사용자 제공)에 정확히 맞춘 선택자를 쓴다: 트리거 버튼(QUOTATION_TRIGGER_SELECTOR)을
     클릭해 옵션 목록을 연 뒤, data-value="quotation_line"인 option 버튼을 클릭한다.
     """
-    frame.locator(QUOTATION_TRIGGER_SELECTOR).first.click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
-    frame.locator(QUOTATION_LINE_OPTION_SELECTOR).click(timeout=SUBHEADING_STYLE_TIMEOUT_MS)
+    # no_wait_after=True: 클릭 자체는 로그상 즉시 성공하는데도 Playwright가 클릭
+    # 이후 "waiting for scheduled navigations to finish" 단계에서 SUBHEADING_STYLE_TIMEOUT_MS를
+    # 다 써버리고 타임아웃하는 현상이 실측 확인됐다(네이버 에디터 SPA가 클릭 직후
+    # 실제 페이지 이동 없는 내부 라우팅/히스토리 이벤트를 발생시켜 Playwright가
+    # 네비게이션으로 오인하는 것으로 추정). 드롭다운 트리거/옵션 클릭은 페이지 이동을
+    # 유발하지 않으므로 이 대기를 건너뛴다.
+    frame.locator(QUOTATION_TRIGGER_SELECTOR).first.click(
+        timeout=SUBHEADING_STYLE_TIMEOUT_MS, no_wait_after=True
+    )
+    frame.locator(QUOTATION_LINE_OPTION_SELECTOR).click(
+        timeout=SUBHEADING_STYLE_TIMEOUT_MS, no_wait_after=True
+    )
 
 
 def _exit_quotation_block(frame: Any) -> None:

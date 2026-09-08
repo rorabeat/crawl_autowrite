@@ -45,6 +45,49 @@ def test_publisher_args_match_contract():
     assert "--session-file" in args
 
 
+def test_build_publisher_env_none_account_returns_none():
+    # 계정 미지정 시 None을 반환해 subprocess_runner.run이 현재 프로세스 환경변수를
+    # 그대로 쓰게 한다(기존 동작 유지 — NaverAutoWrite/.env의 기본 계정 사용).
+    assert config.build_publisher_env(None) is None
+
+
+def test_build_publisher_env_injects_account_credentials():
+    account: config.Account = {
+        "id": "acc1",
+        "label": "본계정",
+        "naver_id": "myid",
+        "naver_pw": "mypw",
+        "blog_id": "myblog",
+        "category": "일상",
+    }
+    env = config.build_publisher_env(account)
+    assert env["NAVER_ID"] == "myid"
+    assert env["NAVER_PW"] == "mypw"
+    assert env["NAVER_BLOG_ID"] == "myblog"
+    assert env["NAVER_CATEGORY"] == "일상"
+
+
+def test_build_publisher_env_omits_category_when_blank():
+    account: config.Account = {
+        "id": "acc1",
+        "label": "본계정",
+        "naver_id": "myid",
+        "naver_pw": "mypw",
+        "blog_id": "myblog",
+        "category": "",
+    }
+    env = config.build_publisher_env(account)
+    assert "NAVER_CATEGORY" not in env
+
+
+def test_publisher_session_file_is_scoped_per_account():
+    path_a = config.publisher_session_file("account_a")
+    path_b = config.publisher_session_file("account_b")
+    assert path_a != path_b
+    assert "account_a" in str(path_a)
+    assert path_a.parent != path_b.parent
+
+
 def test_codex_exec_args_use_image_flag_and_no_prompt_text():
     args = config.build_codex_exec_args(
         image_paths=["C:/work/images/1.jpg", "C:/work/images/2.jpg"],

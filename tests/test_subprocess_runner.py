@@ -39,6 +39,22 @@ def test_run_kills_process_and_returns_minus_one_on_timeout(tmp_path):
     assert rc == -1
 
 
+def test_run_kills_process_and_returns_canceled_rc_when_cancel_event_set(tmp_path):
+    """진행 중인 작업 삭제 기능(사용자 요청) 검증: cancel_event가 set되면 timeout 없이도
+    프로세스를 강제 종료하고 CANCELED_RC(-2)를 반환해야 한다."""
+    import threading
+
+    script = tmp_path / "slow.py"
+    script.write_text("import time\ntime.sleep(10)\n", encoding="utf-8")
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    rc = subprocess_runner.run([sys.executable, str(script)], cancel_event=cancel_event)
+
+    assert rc == subprocess_runner.CANCELED_RC
+
+
 def test_run_nonzero_exit_code_is_propagated(tmp_path):
     script = tmp_path / "fail.py"
     script.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")

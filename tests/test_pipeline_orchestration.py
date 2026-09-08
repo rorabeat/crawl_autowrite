@@ -23,17 +23,17 @@ def test_run_pipeline_calls_steps_in_order_and_writes_result_json(tmp_path, monk
 
     call_order = []
 
-    def fake_run_crawling(context, work_dir):
+    def fake_run_crawling(context, work_dir, **kwargs):
         call_order.append("crawl")
         return "success"
 
-    def fake_run_generation(context, work_dir, blog_txts):
+    def fake_run_generation(context, work_dir, blog_txts, **kwargs):
         call_order.append("generate")
         md_path = config.output_dir(work_dir) / "제목.md"
         md_path.write_text("본문", encoding="utf-8")
         return "success", md_path, []
 
-    def fake_run_publish(md_path, work_dir, login_mode="auto"):
+    def fake_run_publish(md_path, work_dir, login_mode="auto", account_id=None, **kwargs):
         call_order.append("publish")
         return "success", None
 
@@ -58,8 +58,8 @@ def test_run_pipeline_calls_steps_in_order_and_writes_result_json(tmp_path, monk
 def test_run_pipeline_skips_publish_when_generation_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
 
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "success")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: "success")
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts, **kw: ("failed", None, []))
 
     publish_called = []
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: publish_called.append(1))
@@ -73,8 +73,8 @@ def test_run_pipeline_skips_publish_when_generation_failed(tmp_path, monkeypatch
 
 def test_run_pipeline_copies_images_to_images_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "skipped")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: "skipped")
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts, **kw: ("failed", None, []))
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
     image_file = tmp_path / "photo.jpg"
@@ -99,7 +99,7 @@ def test_retry_publish_reinvokes_publish_and_updates_result_json(tmp_path, monke
 
     called_with = {}
 
-    def fake_run_publish(md, wd, login_mode="auto"):
+    def fake_run_publish(md, wd, login_mode="auto", account_id=None, **kwargs):
         called_with["md"] = md
         return "success", None
 
@@ -122,8 +122,8 @@ def test_run_pipeline_skips_crawling_and_image_copy_when_reusing(tmp_path, monke
     (config.images_dir(reuse_dir) / "사진.jpg").write_bytes(b"fake")
 
     crawl_called = []
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: crawl_called.append(1))
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: crawl_called.append(1))
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts, **kw: ("failed", None, []))
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
     context = pipeline.PipelineContext(keyword="재사용", reuse_work_dir=reuse_dir)
@@ -162,3 +162,91 @@ def test_retry_publish_raises_when_no_output_md(tmp_path):
         assert False, "FileNotFoundError가 발생해야 함"
     except FileNotFoundError:
         pass
+
+
+def _write_accounts(tmp_path, monkeypatch, accounts):
+    monkeypatch.setattr(config, "ACCOUNTS_JSON_PATH", tmp_path / "accounts.json")
+    monkeypatch.setattr(config, "LAST_ACCOUNT_JSON_PATH", tmp_path / "last_account.json")
+    pipeline.save_accounts(accounts)
+
+
+def test_run_publish_injects_account_env_and_session_file(tmp_path, monkeypatch):
+    _write_accounts(
+        tmp_path,
+        monkeypatch,
+        [{"id": "acc1", "label": "계정1", "naver_id": "id1", "naver_pw": "pw1", "blog_id": "blog1", "category": ""}],
+    )
+    monkeypatch.setattr(pipeline, "_kill_chrome_on_cdp_port", lambda: None)
+
+    captured = {}
+
+    def fake_run(args, cwd=None, env=None, timeout=None, **kwargs):
+        captured["env"] = env
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    work_dir = tmp_path / "work"
+    md_path = work_dir / "글.md"
+    md_path.parent.mkdir(parents=True)
+    md_path.write_text("본문", encoding="utf-8")
+
+    status, warning = pipeline.run_publish(md_path, work_dir, account_id="acc1")
+
+    assert status == "success"
+    assert warning is None
+    assert captured["env"]["NAVER_ID"] == "id1"
+    assert captured["env"]["NAVER_BLOG_ID"] == "blog1"
+    assert "--session-file" in captured["args"]
+
+
+def test_run_publish_kills_chrome_only_when_account_changes(tmp_path, monkeypatch):
+    _write_accounts(
+        tmp_path,
+        monkeypatch,
+        [
+            {"id": "acc1", "label": "계정1", "naver_id": "id1", "naver_pw": "pw1", "blog_id": "blog1", "category": ""},
+            {"id": "acc2", "label": "계정2", "naver_id": "id2", "naver_pw": "pw2", "blog_id": "blog2", "category": ""},
+        ],
+    )
+    kill_calls = []
+    monkeypatch.setattr(pipeline, "_kill_chrome_on_cdp_port", lambda: kill_calls.append(1))
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", lambda *a, **kw: 0)
+
+    work_dir = tmp_path / "work"
+    md_path = work_dir / "글.md"
+    md_path.parent.mkdir(parents=True)
+    md_path.write_text("본문", encoding="utf-8")
+
+    pipeline.run_publish(md_path, work_dir, account_id="acc1")
+    assert len(kill_calls) == 1  # 최초 실행은 이전 기록이 없어 전환으로 취급
+
+    pipeline.run_publish(md_path, work_dir, account_id="acc1")
+    assert len(kill_calls) == 1  # 같은 계정 연속 실행은 크롬을 종료하지 않음
+
+    pipeline.run_publish(md_path, work_dir, account_id="acc2")
+    assert len(kill_calls) == 2  # 다른 계정으로 전환 시에만 종료
+
+
+def test_run_pipeline_marks_remaining_steps_canceled_when_cancel_event_preset(tmp_path, monkeypatch):
+    """진행 중인 작업 삭제 기능(사용자 요청): cancel_event가 이미 set된 채로 run_pipeline이
+    시작되면, 크롤링부터 발행까지 모든 단계가 "canceled"(또는 발행은 그로 인한 취소)로
+    기록되고 실제 발행 서브프로세스는 호출되지 않아야 한다."""
+    import threading
+
+    monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
+
+    publish_called = []
+    monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: publish_called.append(1))
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    context = pipeline.PipelineContext(keyword="취소 테스트")
+    result = pipeline.run_pipeline(context, cancel_event=cancel_event)
+
+    assert result["steps"]["crawl"]["status"] == "canceled"
+    assert result["steps"]["generate"]["status"] == "canceled"
+    assert result["steps"]["publish"]["status"] == "canceled"
+    assert publish_called == []

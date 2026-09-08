@@ -170,6 +170,28 @@
   - ✅ `app.py`의 `MainWindow`: 좌우 스플리터(탭 영역 | 상세 로그)에서 탭 영역의 가로 `sizePolicy`를 `Ignored`로 바꿔, 버튼 행이 많은 탭("멀티 작업" 7개, "실행·로그" 6개)의 최소 너비가 스플리터 리사이즈를 막던 문제 해결(사용자 리포트: "왼쪽창을 줄이는 데 제한이 있어"), `setChildrenCollapsible(True)`도 명시
   - ✅ 테스트: `_build_generation_prompt`/`_build_image_generation_prompt`에 우회 프로그램 금지 문구 포함 검증 2건 추가 — 전체 스위트 82건 전원 통과. 로그 하이라이트/줄바꿈/스플리터 리사이즈는 실제 GUI 렌더링이 필요해 `docs/MANUAL_QA_CHECKLIST.md`로 수동 검증 항목 추가
 
+- **Task 019: 다중 네이버 계정 발행 지원 (사용자 요청)** ✅ - 완료
+  - ✅ `config.py`: `Account` TypedDict, `ACCOUNTS_JSON_PATH`/`LAST_ACCOUNT_JSON_PATH` 경로 상수, `publisher_session_file(account_id)`(계정별 `.naver_session/{id}/` 프로필 경로), `build_publisher_env(account)`(계정 자격증명을 서브프로세스 `env`로 주입 — `python-dotenv`의 `load_dotenv()`가 이미 설정된 환경변수를 덮어쓰지 않는 점을 이용해 `NaverAutoWrite` 코드/CLI 계약은 전혀 변경하지 않음) 추가
+  - ✅ `pipeline.py`: `PipelineContext`/`TaskItem`에 `account_id` 필드 추가(태스크마다 발행 계정을 독립적으로 지정), `load_accounts`/`save_accounts`/`find_account`/`account_label` 추가(accounts.json CRUD, tasks.json과 동일한 원자적 교체 패턴), `run_publish`가 `account_id`로 계정을 찾아 자격증명/블로그ID/세션 파일을 주입
+  - ✅ `pipeline._kill_chrome_on_cdp_port`: `NaverAutoWrite/naver_login.py`가 CDP 포트 9333에 이미 떠 있는 크롬을 무조건 재사용하는 문제(계정을 바꿔도 이전 계정 프로필이 그대로 재사용됨)를 해결하기 위해, 직전 발행 계정과 이번 계정이 다를 때만 발행 전 크롬 프로세스를 종료(netstat/taskkill, Windows 전용). 마지막 발행 계정은 `last_account.json`에 기록
+  - ✅ `app.py`: `AccountManagerDialog`(accounts.json 추가/수정/삭제 UI, 평문 비밀번호는 가려서 입력), `_populate_account_combo`/`_open_account_manager` 헬퍼, 입력 탭·태스크 편집·대기열 일괄 설정 3곳에 "발행 계정" 드롭다운 추가, 멀티 작업 대기열 목록에 계정 라벨 표시
+  - ✅ `.gitignore`: `accounts.json`(평문 비밀번호), `.naver_session/`(계정별 세션) 등록
+  - ✅ 프로그램 2개를 계정별로 띄우는 방식도 검토했으나 CDP 포트가 코드에 고정돼 있고 `--cdp-port` 옵션이 없어(변경 금지 대상) 동시 발행 시 포트가 충돌함을 확인 — 프로그램 1개 유지 + 발행 단계에서만 계정 전환 시 크롬 재시작 방식으로 확정(`memory-bank/planAndTask.md` 참조)
+  - ✅ 테스트: `tests/test_contracts.py`에 `build_publisher_env`/`publisher_session_file` 3건, `tests/test_pipeline_orchestration.py`에 계정별 env/세션 주입 1건 + 계정 전환 시에만 크롬 종료가 호출되는지 검증하는 1건 추가 — 전체 스위트 112건 전원 통과
+
+- **Task 020: 진행 중 작업 취소 및 대기 작업 우선순위 변경 (사용자 요청)** ✅ - 완료
+  - ✅ `subprocess_runner.run()`에 `cancel_event: threading.Event | None` 인자 추가 — set되면 timeout 유무와 무관하게(내부적으로 0.5초 폴링을 강제) 프로세스를 즉시 강제 종료하고 일반 실패(-1)/타임아웃(-1)과 구분되는 `CANCELED_RC`(-2)를 반환
+  - ✅ `pipeline.py`: `run_crawling`/`run_generation`/`run_image_generation`/`run_publish`/`run_pipeline`이 모두 `cancel_event`를 받아 서브프로세스 호출에 전달하고, 이미 set된 상태로 들어오면 서브프로세스를 시작하지도 않고 즉시 `"canceled"`를 반환 — 한 단계가 취소되면 `run_pipeline`의 나머지 단계도 각자의 진입 시점 검사로 자동 연쇄 취소됨(별도 조기 종료 로직 불필요)
+  - ✅ `app.py`: `PipelineWorker`가 `threading.Event`를 들고 있다가 `cancel()` 호출 시 set, `pipeline.run_pipeline`에 그대로 전달. `JobQueueManager.cancel_current()`(진행 중 작업에 취소 신호 전달, 상태를 "취소 중…"으로 즉시 표시) 및 `move_pending(job_id, offset)`(대기 중 작업 순서 변경, `TaskManager.move`와 동일 패턴) 추가. `_on_worker_finished`가 결과에 `"canceled"` 단계가 있으면 최종 상태를 "취소됨"으로 기록
+  - ✅ `MultiTaskTab` UI: "진행 중 작업" 아래 "진행 중 작업 취소" 버튼(확인 다이얼로그 후 취소 요청, 이미 요청 중이면 비활성화), "대기 중 작업" 버튼 행에 "위로"/"아래로" 순서 변경 버튼 추가
+  - ✅ 테스트: `tests/test_subprocess_runner.py`(cancel_event set 시 CANCELED_RC 반환 1건), `tests/test_pipeline_crawling.py`(사전 취소 시 서브프로세스 미호출 1건, CANCELED_RC 전파 1건), `tests/test_pipeline_orchestration.py`(사전 취소 시 전 단계 canceled 연쇄 1건), `tests/test_job_queue.py`(`move_pending` 순서 변경 1건, `cancel_current` 상태 전이 1건) 추가 — 기존 서브프로세스/파이프라인 fake 함수들에 `cancel_event`/`**kwargs` 파라미터 보강. 전체 스위트 118건 전원 통과
+
+- **Task 021: 첨부 이미지 전량 본문 포함 보장 (사용자 요청)** ✅ - 완료
+  - ✅ `pipeline._build_attached_image_instruction`(신규): `context.image_paths`가 있으면 `_build_generation_prompt`가 `generate_images` 설정과 무관하게 "첨부 이미지 N장을 파일명 그대로 본문에 전부 포함하라"는 지시를 프롬프트에 추가
+  - ✅ `pipeline._ensure_attached_images_included`(신규): `run_generation`이 md를 생성한 직후, 첨부 이미지 파일명이 md 안에 등장하지 않으면(AI가 지시를 어기고 일부만 쓰거나 무시한 경우) 코드 레벨로 글 끝에 강제 삽입 — `_extract_and_apply_claude_images`와 동일한 "코드 레벨 방어" 원칙. 이미 AI가 사용한 이미지는 중복 삽입하지 않음
+  - ✅ claude 백엔드는 이미지 시각 첨부(-i 옵션) 자체가 없어 예전에는 참고 이미지를 통째로 무시하고 경고만 남겼으나(`"claude 백엔드는 이미지 첨부를 지원하지 않아... 무시함"`), 이제 파일명 지시 + 코드 레벨 보완으로 claude 백엔드에서도 첨부 이미지가 항상 본문에 포함됨
+  - ✅ 테스트: `tests/test_generation.py`에 프롬프트 지시 포함/생략 2건, `_ensure_attached_images_included` 단위 테스트 2건(누락분만 추가/전부 있으면 no-op), `run_generation`이 실제로 누락된 첨부 이미지를 md에 강제 삽입하는지 검증하는 통합 테스트 2건(codex/claude 백엔드 각 1건, 기존 exact-match 테스트도 갱신) 추가 — 전체 스위트 123건 전원 통과
+
 ## 일정 및 마일스톤
 
 - PRD 8절에 명시된 대로 구체적 일정은 **TBD**이며, 위 Phase 순서가 제안 마일스톤(입력 GUI 골격 → AGENTS.md 편집 → 크롤링 연동 → codex exec 연동 → 발행 연동 → PostResult 저장/로그 → 통합 테스트)을 반영합니다.

@@ -5,6 +5,7 @@ docs/PRD.md 6절/7절, docs/ROADMAP.md Task 002에서 정의한 단일 소스. P
 docs/PRD.md "기존 구성요소 계약"과 반드시 일치해야 한다(임의 변경 금지).
 """
 
+import os
 import sys
 import re
 from pathlib import Path
@@ -270,6 +271,65 @@ PUBLISHER_ENV_VARS = ("NAVER_ID", "NAVER_PW", "NAVER_BLOG_ID", "NAVER_CATEGORY")
 PUBLISH_TIMEOUT_SEC = 1_200
 
 
+# ---------------------------------------------------------------------------
+# 다중 네이버 계정 (사용자 요청: 여러 계정으로 블로그 글을 발행). accounts.json에 계정
+# 목록을 저장하고(평문, 로컬 전용 — .gitignore 등록됨), 태스크마다 어느 계정으로 발행할지
+# account_id로 지정한다(pipeline.TaskItem/PipelineContext 참조). NaverAutoWrite 자체는
+# .env 하나에서만 자격증명을 읽지만(변경 금지 대상), python-dotenv의 load_dotenv()가 이미
+# 설정된 환경변수를 덮어쓰지 않는 점을 이용해 서브프로세스 실행 시 env로 자격증명을
+# 주입한다(build_publisher_env 참조) — NaverAutoWrite 코드/CLI 계약은 그대로 둔다.
+# ---------------------------------------------------------------------------
+ACCOUNTS_JSON_PATH = _WORK_ROOT / "accounts.json"
+
+# 마지막으로 발행에 사용한 계정을 기록해, 계정이 바뀌는 경계에서만 크롬을 재시작하도록
+# 판단하는 근거로 쓴다(naver_login.py의 CDP 포트 9333 고정 재사용 때문 — 계정이 다르면
+# 프로필을 새로 지정해도 이미 떠 있는 이전 계정 크롬에 그대로 붙어버림).
+LAST_ACCOUNT_JSON_PATH = _WORK_ROOT / "last_account.json"
+
+
+class Account(TypedDict):
+    id: str
+    label: str
+    naver_id: str
+    naver_pw: str
+    blog_id: str
+    category: str
+
+
+def publisher_session_file(account_id: str) -> Path:
+    """계정별로 분리된 크롬 프로필(세션) 경로를 만든다.
+
+    NaverAutoWrite/naver_login.py의 create_browser_context는 --session-file의 부모
+    폴더를 그대로 Chrome user-data-dir로 재사용하므로, 계정마다 다른 폴더를 주면 계정별로
+    로그인 세션(쿠키)이 분리된다. NaverAutoWrite/.gitignore가 이미 `.naver_session/`을
+    제외하고 있으므로 그 하위에 계정 ID로 폴더를 나눈다.
+    """
+    return PUBLISHER_DIR / ".naver_session" / account_id / "storage_state.json"
+
+
+def build_publisher_env(account: "Account | None") -> dict[str, str] | None:
+    """계정별 자격증명을 담은 서브프로세스 환경변수 dict를 만든다.
+
+    account가 None이면(계정 미지정) None을 반환해 subprocess_runner.run이 현재 프로세스의
+    환경변수를 그대로 쓰게 한다(기존 동작과 동일 — NaverAutoWrite/.env의 기본 계정 사용).
+    account가 주어지면 os.environ을 복사한 뒤 NAVER_ID/NAVER_PW/NAVER_BLOG_ID/
+    NAVER_CATEGORY만 그 계정 값으로 덮어쓴다. NaverAutoWrite/config.py의 load_dotenv()는
+    이미 설정된 환경변수를 덮어쓰지 않으므로(python-dotenv 기본 동작), 이 값이 .env보다
+    우선 적용된다 — NaverAutoWrite 코드는 전혀 건드리지 않는다.
+    """
+    if account is None:
+        return None
+    env = dict(os.environ)
+    env["NAVER_ID"] = account["naver_id"]
+    env["NAVER_PW"] = account["naver_pw"]
+    env["NAVER_BLOG_ID"] = account["blog_id"]
+    if account.get("category"):
+        env["NAVER_CATEGORY"] = account["category"]
+    else:
+        env.pop("NAVER_CATEGORY", None)
+    return env
+
+
 def build_publisher_args(
     md_path: Path,
     blog_id: str | None = None,
@@ -286,6 +346,32 @@ def build_publisher_args(
     자동 입력 없이 사람이 직접 로그인부터 진행한다(NaverAutoWrite/main.py --login-mode).
     """
     args = [PUBLISHER_SCRIPT, "--md", str(md_path)]
+    if blog_id:
+        args += ["--blog-id", blog_id]
+    if headless:
+        args.append("--headless")
+    if session_file:
+        args += ["--session-file", str(session_file)]
+    args += ["--login-mode", login_mode]
+    return args
+
+
+PRELOGIN_SCRIPT = "prelogin.py"
+
+
+def build_prelogin_args(
+    blog_id: str | None = None,
+    headless: bool = False,
+    session_file: Path | None = None,
+    login_mode: str = "auto",
+) -> list[str]:
+    """미리 로그인만 수행하는 prelogin.py 서브프로세스 인자 리스트를 만든다.
+
+    build_publisher_args와 같은 계정별 인자(blog_id/session_file/login_mode)를
+    그대로 받되 --md는 없다(사용자 요청: 태스크 시작과 동시에 크롬을 미리 띄워
+    크롤링/AI 생성이 진행되는 동안 로그인을 마칠 수 있게 함, run_prelogin 참조).
+    """
+    args = [PRELOGIN_SCRIPT]
     if blog_id:
         args += ["--blog-id", blog_id]
     if headless:

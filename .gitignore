@@ -55,6 +55,7 @@ GetImage/_cache/
 # Claude Code 로컬 전용 설정/락 파일(팀 공유용 settings.json은 추적)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+last_account.json
 
 # 서브 프로젝트(NaverBlogCrawlingByPlayWright/, NaverAutoWrite/)는 각자 자체 .gitignore로
 # .env·가상환경·크롬 세션 프로필을 이미 제외한다.

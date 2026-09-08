@@ -128,6 +128,78 @@ def test_build_generation_prompt_uses_placeholder_instruction_for_claude_backend
     assert "정확히 2개" in prompt
 
 
+def test_build_generation_prompt_includes_attached_image_instruction(monkeypatch):
+    """사용자가 이미지를 첨부하면(generate_images 여부와 무관하게) 모두 본문에 포함시키라는
+    지시가 프롬프트에 들어가야 한다(사용자 요청)."""
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(
+        keyword="키워드", generate_images=False, image_paths=["/tmp/a.jpg", "/tmp/b.png"]
+    )
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
+
+    assert "a.jpg" in prompt
+    assert "b.png" in prompt
+    assert "모두" in prompt or "전부" in prompt
+
+
+def test_build_generation_prompt_omits_attached_image_instruction_when_no_images(monkeypatch):
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    context = pipeline.PipelineContext(keyword="키워드", image_paths=[])
+    prompt = pipeline._build_generation_prompt(context, [], "codex")
+
+    assert "첨부 이미지 지시" not in prompt
+
+
+def test_ensure_attached_images_included_appends_only_missing_ones(tmp_path):
+    md_path = tmp_path / "글.md"
+    md_path.write_text("본문 중간에 ![사진](images/a.jpg) 이미 있음", encoding="utf-8")
+
+    added = pipeline._ensure_attached_images_included(md_path, ["/원본/a.jpg", "/원본/b.png"])
+
+    assert added == 1
+    text = md_path.read_text(encoding="utf-8")
+    assert text.count("a.jpg") == 1  # 이미 있던 것은 중복 삽입되지 않음
+    assert "images/b.png" in text
+
+
+def test_ensure_attached_images_included_noop_when_all_already_present(tmp_path):
+    md_path = tmp_path / "글.md"
+    md_path.write_text("![사진](images/a.jpg)", encoding="utf-8")
+
+    added = pipeline._ensure_attached_images_included(md_path, ["/원본/a.jpg"])
+
+    assert added == 0
+
+
+def test_run_generation_uses_attached_image_filename_as_is_for_claude_backend(tmp_path, monkeypatch):
+    """claude 백엔드는 이미지를 시각적으로 첨부하지 못하지만(_build_claude_exec_args에
+    -i 옵션이 없음), 응답에 참조가 없어도 코드 레벨 보완으로 첨부 이미지가 모두 포함돼야
+    한다(사용자 요청 — claude 하이쿠로 첨부 이미지가 통째로 무시되던 문제 해결)."""
+    monkeypatch.setattr(pipeline.agents_editor, "load_agents_md", lambda: "지침")
+
+    image_file = tmp_path / "photo.jpg"
+    image_file.write_bytes(b"fake")
+
+    def fake_run(args, cwd=None, input_text=None, tee_path=None, **kwargs):
+        tee_path.parent.mkdir(parents=True, exist_ok=True)
+        tee_path.write_text("AI가 쓴 본문(이미지 언급 없음)", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+
+    work_dir = tmp_path / "work"
+    context = pipeline.PipelineContext(
+        keyword="키워드", use_crawling=False, image_paths=[str(image_file)], ai_model="claude:sonnet"
+    )
+
+    status, md_path, _ = pipeline.run_generation(context, work_dir, [])
+
+    assert status == "success"
+    assert "images/photo.jpg" in md_path.read_text(encoding="utf-8")
+
+
 def test_extract_and_apply_claude_images_replaces_placeholders(tmp_path, monkeypatch):
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -251,7 +323,12 @@ def test_run_generation_passes_absolute_image_paths_and_writes_md(tmp_path, monk
 
     assert status == "success"
     assert md_path.exists()
-    assert md_path.read_text(encoding="utf-8") == "생성된 본문"
+    # AI가 응답 본문에 첨부 이미지를 언급하지 않아도(여기서는 아예 참조가 없음),
+    # 사용자가 첨부한 이미지는 모두 본문에 포함돼야 한다(사용자 요청 —
+    # _ensure_attached_images_included가 누락된 첨부 이미지를 코드로 강제 삽입함).
+    text = md_path.read_text(encoding="utf-8")
+    assert "생성된 본문" in text
+    assert "images/photo.jpg" in text
     assert generated_images == []
 
     image_index = captured_args["args"].index("--image")

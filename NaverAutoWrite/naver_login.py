@@ -142,6 +142,18 @@ def create_browser_context(
 
     browser = playwright.chromium.connect_over_cdp(_cdp_url())
     context = browser.contexts[0] if browser.contexts else browser.new_context(viewport={"width": 1280, "height": 800})
+
+    # 크롬이 새로 뜨든(빈 새 탭) 기존 프로세스에 재연결하든, 사용자가 "크롬만 뜨고
+    # 아무것도 안 보인다"고 느끼지 않도록 연결 직후 첫 탭을 곧바로 로그인 페이지로
+    # 이동시킨다(사용자 요청). 이미 로그인된 세션이면 nid.naver.com이 알아서 네이버
+    # 홈으로 리다이렉트하므로 로그인 상태를 눈으로 바로 확인할 수 있다.
+    page = context.pages[0] if context.pages else context.new_page()
+    page.bring_to_front()
+    try:
+        page.goto(NIDLOGIN_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+    except Exception:
+        pass
+
     return context, reused
 
 
@@ -194,8 +206,11 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
     (클립보드 자동 붙여넣기가 "이상 로그인 시도"로 자주 탐지되는 계정을 위함).
     (F011) auto 모드에서만 아이디/비밀번호 오류를 판별해 LoginFailedError를 던진다.
     """
-    page = context.new_page()
+    # create_browser_context가 연결 직후 이미 첫 탭을 로그인 페이지로 이동시켜 두므로,
+    # 그 탭을 그대로 재사용한다(탭이 중복으로 쌓이지 않도록).
+    page = context.pages[0] if context.pages else context.new_page()
     try:
+        page.bring_to_front()
         page.goto(NIDLOGIN_URL)
         wait_for_selector(page, "#id")
 

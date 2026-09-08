@@ -15,6 +15,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+CANCELED_RC = -2
+
 logger = logging.getLogger(__name__)
 
 _SENTINEL = object()
@@ -34,6 +36,7 @@ def run(
     on_output: Callable[[str], None] | None = None,
     input_text: str | None = None,
     tee_path: Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """인자 리스트로 서브프로세스를 실행하고 종료 코드를 반환한다.
 
@@ -54,6 +57,12 @@ def run(
     대응하는 옵션이 없어(사용자 요청으로 추가한 claude 백엔드) 이 옵션으로 대체한다
     (전체 stdout이라 codex의 "최종 응답만"과는 의미가 정확히 같지는 않지만, 둘 다
     "1순위 결과 파일을 못 찾았을 때의 폴백"일 뿐이라 호출부 입장에서는 동일하게 쓸 수 있다).
+
+    cancel_event가 주어지고 실행 도중 set()되면(사용자 요청: 진행 중인 작업 삭제 기능)
+    타임아웃과 동일하게 프로세스를 강제 종료하되, 구분을 위해 CANCELED_RC(-2)를
+    반환한다. timeout이 없어도 cancel_event가 있으면 0.5초마다 깨어나 취소 여부를
+    확인한다(원래 timeout이 없으면 출력이 없는 동안 무한정 블로킹돼 취소를 확인할
+    타이밍이 없었음).
     """
     effective_env = dict(env) if env is not None else dict(os.environ)
     effective_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -112,8 +121,17 @@ def run(
                     logger.warning("subprocess_runner.run 타임아웃: args=%s", args)
                     return -1
                 wait_for = min(remaining, 0.5)
+            elif cancel_event is not None:
+                wait_for = 0.5
             else:
                 wait_for = None
+
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                proc.wait()
+                thread.join(timeout=1)
+                logger.info("subprocess_runner.run 취소됨: args=%s", args)
+                return CANCELED_RC
 
             try:
                 line = line_queue.get(timeout=wait_for)

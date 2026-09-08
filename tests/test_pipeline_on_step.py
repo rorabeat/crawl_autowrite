@@ -7,8 +7,8 @@ import pipeline
 def test_run_pipeline_without_on_step_still_works(tmp_path, monkeypatch):
     """on_step 생략 시 기존 동작과 동일해야 한다(하위 호환)."""
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "skipped")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: "skipped")
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts, **kw: ("failed", None, []))
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
     context = pipeline.PipelineContext(keyword="키워드")
@@ -19,11 +19,11 @@ def test_run_pipeline_without_on_step_still_works(tmp_path, monkeypatch):
 
 def test_run_pipeline_calls_on_step_running_then_final_for_each_stage(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "success")
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: "success")
     monkeypatch.setattr(
         pipeline,
         "run_generation",
-        lambda context, work_dir, blog_txts: ("success", config.output_dir(work_dir) / "제목.md", []),
+        lambda context, work_dir, blog_txts, **kw: ("success", config.output_dir(work_dir) / "제목.md", []),
     )
     monkeypatch.setattr(pipeline, "run_publish", lambda *a, **kw: ("success", None))
 
@@ -48,8 +48,8 @@ def test_run_pipeline_calls_on_step_running_then_final_for_each_stage(tmp_path, 
 
 def test_run_pipeline_on_step_reports_publish_skipped_when_generation_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
-    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir: "success")
-    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts: ("failed", None, []))
+    monkeypatch.setattr(pipeline, "run_crawling", lambda context, work_dir, **kw: "success")
+    monkeypatch.setattr(pipeline, "run_generation", lambda context, work_dir, blog_txts, **kw: ("failed", None, []))
 
     calls = []
     context = pipeline.PipelineContext(keyword="키워드")

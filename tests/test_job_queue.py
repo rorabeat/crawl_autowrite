@@ -13,13 +13,16 @@ def test_second_job_waits_until_first_finishes(qtbot, monkeypatch):
     release_first = threading.Event()
     started_order: list[str] = []
 
-    def fake_run_pipeline(context, on_step=None):
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
         started_order.append(context.keyword)
         if context.keyword == "첫번째":
             release_first.wait(timeout=3)
         return {"keyword": context.keyword, "steps": {}}
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
 
     queue = JobQueueManager()
     done_job_ids: list[int] = []
@@ -54,13 +57,16 @@ def test_remove_pending_cancels_queued_job_before_it_starts(qtbot, monkeypatch):
     release_first = threading.Event()
     started_order: list[str] = []
 
-    def fake_run_pipeline(context, on_step=None):
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
         started_order.append(context.keyword)
         if context.keyword == "첫번째":
             release_first.wait(timeout=3)
         return {"keyword": context.keyword, "steps": {}}
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
 
     queue = JobQueueManager()
 
@@ -92,11 +98,14 @@ def test_multi_task_tab_reflects_queue_state(qtbot, monkeypatch, tmp_path):
 
     release = threading.Event()
 
-    def fake_run_pipeline(context, on_step=None):
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
         release.wait(timeout=3)
         return {"keyword": context.keyword, "steps": {}}
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
 
     queue = JobQueueManager()
     task_manager = TaskManager()
@@ -126,11 +135,14 @@ def test_enqueue_removes_task_from_saved_list(qtbot, monkeypatch, tmp_path):
 
     release = threading.Event()
 
-    def fake_run_pipeline(context, on_step=None):
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
         release.wait(timeout=3)
         return {"keyword": context.keyword, "steps": {}}
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
 
     queue = JobQueueManager()
     task_manager = TaskManager()
@@ -153,3 +165,79 @@ def test_enqueue_removes_task_from_saved_list(qtbot, monkeypatch, tmp_path):
 
     release.set()
     qtbot.waitUntil(lambda: tab.pending_list.count() == 0 and tab.current_list.count() == 0, timeout=3000)
+
+
+def test_move_pending_reorders_queue(qtbot, monkeypatch):
+    """대기 중인 작업의 실행 순서를 위/아래로 바꿀 수 있어야 한다(사용자 요청)."""
+    import pipeline
+
+    release_first = threading.Event()
+
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
+        if context.keyword == "첫번째":
+            release_first.wait(timeout=3)
+        return {"keyword": context.keyword, "steps": {}}
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
+
+    queue = JobQueueManager()
+    job1 = queue.enqueue(PipelineContext(keyword="첫번째"), "첫번째")
+    qtbot.waitUntil(lambda: queue.current_job() is not None and queue.current_job().job_id == job1.job_id)
+
+    job2 = queue.enqueue(PipelineContext(keyword="두번째"), "두번째")
+    job3 = queue.enqueue(PipelineContext(keyword="세번째"), "세번째")
+    assert [j.job_id for j in queue.pending_jobs()] == [job2.job_id, job3.job_id]
+
+    assert queue.move_pending(job3.job_id, -1) is True
+    assert [j.job_id for j in queue.pending_jobs()] == [job3.job_id, job2.job_id]
+
+    # 맨 위 항목을 더 위로 옮기려 하면 조용히 무시(False)한다.
+    assert queue.move_pending(job3.job_id, -1) is False
+    assert [j.job_id for j in queue.pending_jobs()] == [job3.job_id, job2.job_id]
+
+    # 존재하지 않는 job_id는 False.
+    assert queue.move_pending(99999, 1) is False
+
+    release_first.set()
+    qtbot.waitUntil(lambda: queue.current_job() is None, timeout=3000)
+
+
+def test_cancel_current_marks_job_canceled_and_stops_worker(qtbot, monkeypatch):
+    """진행 중인 작업을 취소하면 cancel_event가 set되고, 워커가 "canceled" 단계가
+    포함된 결과를 반환하면 최종 상태가 "취소됨"으로 기록되어야 한다(사용자 요청:
+    진행 중인 작업 삭제 기능)."""
+    import pipeline
+
+    saw_cancel_event: list[bool] = []
+
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
+        # 실제 pipeline.run_pipeline처럼 cancel_event가 set될 때까지 짧게 대기하다가
+        # 취소된 것으로 응답한다.
+        assert cancel_event is not None
+        cancel_event.wait(timeout=3)
+        saw_cancel_event.append(cancel_event.is_set())
+        return {"keyword": context.keyword, "steps": {"crawl": {"status": "canceled"}}}
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    # PipelineWorker.run()이 사전 로그인을 백그라운드 스레드로 띄우는데, 실제
+    # 서브프로세스(NaverAutoWrite/prelogin.py)를 테스트 중에 진짜로 실행하면 안 되므로 무력화한다.
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
+
+    queue = JobQueueManager()
+    job1 = queue.enqueue(PipelineContext(keyword="취소대상"), "취소대상")
+    qtbot.waitUntil(lambda: queue.current_job() is not None and queue.current_job().job_id == job1.job_id)
+
+    assert queue.cancel_current() is True
+    # 취소 신호를 보낸 직후에는 아직 워커가 끝나지 않았을 수 있으므로 "취소 중…" 상태.
+    assert queue.current_job().status == "취소 중…"
+    # 이미 취소 요청을 보낸 상태에서 다시 취소해도(중복 클릭) 문제없이 True를 반환한다.
+    assert queue.cancel_current() is True
+
+    qtbot.waitUntil(lambda: queue.current_job() is None, timeout=3000)
+    assert saw_cancel_event == [True]
+
+    # 진행 중인 작업이 없을 때는 False.
+    assert queue.cancel_current() is False

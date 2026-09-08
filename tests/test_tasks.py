@@ -125,12 +125,19 @@ def test_task_item_image_gen_count_round_trips(tmp_path, monkeypatch):
     assert loaded[0].image_gen_count == 5
 
 
-def test_task_edit_dialog_ai_model_combo_defaults_and_round_trips(qtbot):
+def test_task_edit_dialog_ai_model_combo_defaults_and_round_trips(qtbot, tmp_path, monkeypatch):
+    # ai_model_combo가 이제 input_defaults.json의 마지막 저장값을 기본으로 띄우므로
+    # (사용자 요청: 다음 태스크에도 같은 AI 모델/발행 계정을 기억), 실제 저장소의
+    # input_defaults.json 내용에 테스트 결과가 좌우되지 않도록 격리한다.
+    monkeypatch.setattr(config, "INPUT_DEFAULTS_JSON_PATH", tmp_path / "input_defaults.json")
+
     from app import TaskEditDialog
 
     dialog = TaskEditDialog()
     qtbot.addWidget(dialog)
-    assert dialog.ai_model_combo.currentData() == "codex:gpt-5.6-sol"
+    # 저장된 input_defaults.json이 없을 때(격리된 tmp_path)는 config.AI_MODEL_DEFAULT로
+    # 뜬다 — InputTab과 동일한 기본값 규칙(사용자 요청: 마지막으로 쓴 값을 기억).
+    assert dialog.ai_model_combo.currentData() == config.AI_MODEL_DEFAULT
 
     idx = dialog.ai_model_combo.findData("claude:sonnet")
     assert idx >= 0
@@ -139,6 +146,12 @@ def test_task_edit_dialog_ai_model_combo_defaults_and_round_trips(qtbot):
 
     task = dialog.get_task_item()
     assert task.ai_model == "claude:sonnet"
+
+    # ai_model_combo를 바꾸면 곧바로 input_defaults.json에 저장되어(사용자 요청), 다음에
+    # 새로 여는 TaskEditDialog가 이 값을 기본으로 띄운다.
+    reopened = TaskEditDialog()
+    qtbot.addWidget(reopened)
+    assert reopened.ai_model_combo.currentData() == "claude:sonnet"
 
 
 def test_task_edit_dialog_loads_existing_task_ai_model(qtbot):

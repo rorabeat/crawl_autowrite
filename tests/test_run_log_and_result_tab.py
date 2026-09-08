@@ -9,7 +9,7 @@ from app import InputTab, ResultTab, RunLogTab
 def test_run_log_tab_runs_worker_and_updates_ui(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
 
-    def fake_run_pipeline(context, on_step=None):
+    def fake_run_pipeline(context, on_step=None, cancel_event=None):
         if on_step:
             on_step("crawl", "running")
             on_step("crawl", "skipped")
@@ -22,6 +22,7 @@ def test_run_log_tab_runs_worker_and_updates_ui(qtbot, monkeypatch, tmp_path):
     import pipeline
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(pipeline, "run_prelogin", lambda *args, **kwargs: None)
 
     input_tab = InputTab()
     qtbot.addWidget(input_tab)
@@ -59,7 +60,7 @@ def test_run_log_tab_step_buttons_run_independently_and_show_prompt(qtbot, monke
         md_path.write_text("# 제목\n\n본문", encoding="utf-8")
         return "success", md_path, []
 
-    def fake_run_publish(md_path, work_dir, login_mode="auto"):
+    def fake_run_publish(md_path, work_dir, login_mode="auto", account_id=None, **kwargs):
         return "success", None
 
     monkeypatch.setattr(pipeline, "run_crawling", fake_run_crawling)
