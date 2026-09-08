@@ -306,6 +306,34 @@ def _save_last_publish_identity(identity: str) -> None:
     tmp_path.replace(config.LAST_ACCOUNT_JSON_PATH)
 
 
+# run_prelogin과 run_publish는 각자 독립적으로 "저장된 마지막 로그인 계정과 다르면
+# 크롬을 죽이고 새 계정 프로필로 다시 띄운다"를 판단한다(_kill_chrome_on_cdp_port).
+# PipelineWorker.run(app.py)이 run_prelogin을 join하지 않는 백그라운드 스레드로 띄우고
+# run_pipeline(→run_publish)을 동시에 진행시키므로, 크롤링/생성이 빨리 끝나 run_publish가
+# run_prelogin의 크롬 kill/재기동/재로그인이 끝나기 전에 시작되면 두 호출이 같은 CDP
+# 포트(9333)를 두고 동시에 kill+launch를 시도하는 경쟁이 생긴다 — 로그인 중이던(또는
+# 막 로그인 성공한) 크롬이 중간에 강제 종료되어 "계정마다 로그인이 잘 안 된다"는 증상의
+# 원인이었다. 이 락으로 "identity 비교 → (필요 시) kill → 서브프로세스 실행 → identity
+# 저장" 구간 전체를 직렬화해, 같은 프로세스 내 어떤 스레드도 한 번에 하나씩만 크롬을
+# 건드리게 한다(다음 작업의 run_prelogin도 이 락을 거쳐야 하므로, 이전 작업이 띄운
+# 잔여 스레드와도 안전하게 순서가 보장된다).
+_chrome_account_lock = threading.Lock()
+
+
+def _acquire_chrome_lock(cancel_event: threading.Event | None) -> bool:
+    """cancel_event를 폴링하며 _chrome_account_lock을 얻는다.
+
+    subprocess_runner.run의 취소 폴링(0.5초 간격)과 같은 방식 — 락을 무기한 blocking
+    acquire()로 기다리면 진행 중 작업 삭제 기능이 이 대기 구간에서는 반응하지 않으므로,
+    0.5초마다 깨어나 취소 여부를 확인한다. 취소되면 락을 얻지 못한 채 False를 반환한다.
+    """
+    while True:
+        if _chrome_account_lock.acquire(timeout=0.5):
+            return True
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+
+
 def _kill_chrome_on_cdp_port(port: int = 9333) -> None:
     """CDP 포트를 점유한 크롬 프로세스를 강제 종료한다(다중 계정 발행 전환용).
 
@@ -994,28 +1022,36 @@ def run_prelogin(
 
     account = find_account(account_id)
     identity = account_id if account is not None else _DEFAULT_ACCOUNT_KEY
-    if _load_last_publish_identity() != identity:
-        _kill_chrome_on_cdp_port()
 
-    publisher_dir = config.PUBLISHER_DIR.resolve()
-    session_file = config.publisher_session_file(account_id) if account is not None else None
-    blog_id = account["blog_id"] if account is not None else None
-    args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_prelogin_args(
-        blog_id=blog_id, session_file=session_file, login_mode=login_mode
-    )
-    env = config.build_publisher_env(account)
-    try:
-        rc = subprocess_runner.run(
-            args, cwd=publisher_dir, env=env, timeout=config.PUBLISH_TIMEOUT_SEC, cancel_event=cancel_event
-        )
-    except Exception:
-        logger.exception("run_prelogin: 사전 로그인 시도 중 예외 발생(무시하고 발행 단계에서 재시도)")
+    # _chrome_account_lock: run_publish(동일 태스크의 발행 단계)와 크롬 kill/재기동/
+    # identity 저장 구간이 겹치지 않도록 직렬화한다(위 _chrome_account_lock 정의부 참조).
+    if not _acquire_chrome_lock(cancel_event):
         return False
+    try:
+        if _load_last_publish_identity() != identity:
+            _kill_chrome_on_cdp_port()
 
-    if rc == 0:
-        _save_last_publish_identity(identity)
-    logger.info("run_prelogin: rc=%d", rc)
-    return rc == 0
+        publisher_dir = config.PUBLISHER_DIR.resolve()
+        session_file = config.publisher_session_file(account_id) if account is not None else None
+        blog_id = account["blog_id"] if account is not None else None
+        args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_prelogin_args(
+            blog_id=blog_id, session_file=session_file, login_mode=login_mode
+        )
+        env = config.build_publisher_env(account)
+        try:
+            rc = subprocess_runner.run(
+                args, cwd=publisher_dir, env=env, timeout=config.PUBLISH_TIMEOUT_SEC, cancel_event=cancel_event
+            )
+        except Exception:
+            logger.exception("run_prelogin: 사전 로그인 시도 중 예외 발생(무시하고 발행 단계에서 재시도)")
+            return False
+
+        if rc == 0:
+            _save_last_publish_identity(identity)
+        logger.info("run_prelogin: rc=%d", rc)
+        return rc == 0
+    finally:
+        _chrome_account_lock.release()
 
 
 def run_publish(
@@ -1045,20 +1081,30 @@ def run_publish(
         logger.warning("run_publish: account_id=%s를 accounts.json에서 찾을 수 없어 기본 계정으로 진행함", account_id)
 
     identity = account_id if account is not None else _DEFAULT_ACCOUNT_KEY
-    if _load_last_publish_identity() != identity:
-        _kill_chrome_on_cdp_port()
 
-    publisher_dir = config.PUBLISHER_DIR.resolve()
-    session_file = config.publisher_session_file(account_id) if account is not None else None
-    blog_id = account["blog_id"] if account is not None else None
-    args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_publisher_args(
-        md_path.resolve(), blog_id=blog_id, session_file=session_file, login_mode=login_mode
-    )
-    env = config.build_publisher_env(account)
-    rc = subprocess_runner.run(
-        args, cwd=publisher_dir, env=env, timeout=config.PUBLISH_TIMEOUT_SEC, cancel_event=cancel_event
-    )
-    _save_last_publish_identity(identity)
+    # _chrome_account_lock: 같은 태스크의 run_prelogin(백그라운드 스레드)이 아직 크롬을
+    # kill/재기동/재로그인하는 중이면 그 작업이 끝날 때까지 기다린다 — 그렇지 않으면
+    # run_publish가 저장된 identity가 아직 갱신되지 않은 걸 보고 똑같이 크롬을 죽여버려
+    # 로그인 중이던 크롬이 강제 종료되는 경쟁이 생긴다(위 _chrome_account_lock 정의부 참조).
+    if not _acquire_chrome_lock(cancel_event):
+        return "canceled", None
+    try:
+        if _load_last_publish_identity() != identity:
+            _kill_chrome_on_cdp_port()
+
+        publisher_dir = config.PUBLISHER_DIR.resolve()
+        session_file = config.publisher_session_file(account_id) if account is not None else None
+        blog_id = account["blog_id"] if account is not None else None
+        args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_publisher_args(
+            md_path.resolve(), blog_id=blog_id, session_file=session_file, login_mode=login_mode
+        )
+        env = config.build_publisher_env(account)
+        rc = subprocess_runner.run(
+            args, cwd=publisher_dir, env=env, timeout=config.PUBLISH_TIMEOUT_SEC, cancel_event=cancel_event
+        )
+        _save_last_publish_identity(identity)
+    finally:
+        _chrome_account_lock.release()
 
     if rc == subprocess_runner.CANCELED_RC:
         return "canceled", None

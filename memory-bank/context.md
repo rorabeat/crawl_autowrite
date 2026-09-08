@@ -99,7 +99,51 @@
 - 테스트 5건 추가(`tests/test_generation.py`), 기존 정확 일치(`==`) 테스트 1건은 새 동작에
   맞게 `in` 검사로 갱신. **전체 테스트 스위트 123건 전원 통과.**
 
+## 계정 전환 시 크롬 kill/재로그인 경쟁 조건 수정 — 구현 완료 (2026-09-08)
+사용자 리포트: "글 마다 아이디를 설정하는데 로그인이 잘 안되는것 같다." 코드 검토로
+근본 원인을 특정하고 수정함. `memory-bank/planAndTask.md`에는 아직 별도 절로 옮기지
+않았음(다음 세션에서 번호 배정해 정리 필요).
+
+### 근본 원인
+- `NaverAutoWrite/naver_login.py`는 CDP 포트(9333)에 크롬이 이미 떠 있으면 무조건
+  재사용한다 — 계정을 바꾸려면 발행 전에 반드시 기존 크롬을 강제 종료해야 한다
+  (`pipeline._kill_chrome_on_cdp_port`).
+- `app.py`의 `PipelineWorker.run()`이 `pipeline.run_prelogin`을 **join하지 않는 데몬
+  스레드**로 띄우고 `run_pipeline`(→`run_publish`)을 동시에 진행시킨다. 크롤링/생성이
+  빨리 끝나면 `run_publish`가 시작되는 시점에 `run_prelogin`의 크롬 kill/재기동/재로그인이
+  아직 안 끝나 있을 수 있고, 이때 `run_publish`도 `last_account.json`이 아직 갱신 안 된
+  걸 보고 **똑같이 크롬을 kill**해버려 로그인 중이던(또는 막 성공한) 크롬이 중간에
+  강제 종료된다. `pipeline.py`에는 이 구간을 보호하는 락이 전혀 없었다(확인 완료).
+  작업(태스크) 간 경계에서도 `JobQueueManager._on_worker_finished`가 이전 작업의 잔여
+  prelogin 스레드를 기다리지 않고 바로 다음 작업을 시작시켜, 다른 계정으로 전환되는
+  다음 작업과도 같은 방식으로 경쟁할 수 있었다.
+- 계정을 안 바꾸면(kill 자체가 안 일어남) 문제가 드러나지 않고, 계정을 바꿀 때만
+  간헐적으로 실패하는 게 사용자 체감과 정확히 일치.
+
+### 무엇이 바뀌었는지
+- `pipeline.py`: 모듈 레벨 `_chrome_account_lock`(`threading.Lock`) 추가 + 취소 인지
+  획득 헬퍼 `_acquire_chrome_lock(cancel_event)`(0.5초 폴링, `subprocess_runner.run`의
+  취소 폴링과 동일 패턴). `run_prelogin`/`run_publish` 둘 다 "identity 비교 → (필요 시)
+  kill → 서브프로세스 실행 → identity 저장" 구간 전체를 이 락으로 감싸 직렬화했다 —
+  한 프로세스 내 어떤 스레드도 한 번에 하나씩만 크롬을 건드리게 됨. 락 대기 중
+  `cancel_event`가 set되면 무기한 대기하지 않고 즉시 `("canceled", None)`/`False` 반환.
+- 테스트: `tests/test_publish.py`에 2건 추가 — (1) `run_prelogin`/`run_publish`를
+  동시에 실행해도 두 함수의 "크롬을 건드리는" 구간이 절대 겹치지 않음을 검증(공유
+  카운터로 overlap 감지), (2) 락이 잡혀 있는 동안 `cancel_event`가 set되면 무기한
+  대기하지 않고 "canceled"를 반환함을 검증. **전체 테스트 스위트 125건 전원 통과.**
+
+### 재조사 불필요한 핵심 사실
+- 이 락은 크롬을 "건드리는" 시간 전체(서브프로세스 실행 포함, 최대 `PUBLISH_TIMEOUT_SEC`
+  =1200초)를 잠그므로, `run_publish`가 같은 태스크의 `run_prelogin`이 아직 로그인
+  중이면 그게 끝날 때까지 기다리는 것이 **의도된 동작**이다(원래도 로그인이 끝나야
+  발행이 의미가 있으므로 대기가 맞다 — 문제였던 건 "기다리지 않고 동시에 kill"이었다).
+- 실제 네이버 계정으로 로그인/발행까지 라이브 테스트는 하지 않았다(자격증명 필요,
+  단위 테스트로만 락 동작 검증함) — 사용자가 실제 계정 2개로 다시 확인해 볼 것.
+
 ## 다음 할 일
+- 위 크롬 kill/재로그인 경쟁 조건 수정을 실제 계정 2개로 다시 발행해 보며 "로그인이
+  잘 안 됨" 증상이 재현되는지 확인 필요(사용자 검증 대기).
+- `memory-bank/planAndTask.md`에 이번 수정을 별도 절/번호로 정리해 넣을 것.
 - 사용자가 실제 GUI에서 계정 관리/발행 동작, 취소/순서변경 UI를 확인하고 싶다면
   `python app.py`로 실행 — `docs/MANUAL_QA_CHECKLIST.md` 15/16번 섹션 참조.
 - 첨부 이미지 포함 보장 기능은 실제 codex/claude exec 응답으로 검증한 적은 없음(전부
@@ -113,9 +157,8 @@
   아직 커밋 전 — 아래 "커밋 상태" 참조).
 
 ## 커밋 상태
-이번 세션에서 구현한 다중 계정 발행(Task 019) + 진행 중 작업 취소/우선순위 변경(Task 020)
-+ 첨부 이미지 전량 포함 보장(Task 021) 코드는 **아직 커밋되지 않음**. 사용자가 커밋/푸시를
-요청하면 `config.py`/`pipeline.py`/`app.py`/`subprocess_runner.py`/`tests/*`/
-`docs/PRD.md`/`docs/ROADMAP.md`/`docs/MANUAL_QA_CHECKLIST.md`/`.gitignore`/
-`memory-bank/*`가 대상이다. `accounts.json`/`last_account.json`은 실행 중 생성되면
-`.gitignore`로 자동 제외된다.
+다중 계정 발행(Task 019) + 진행 중 작업 취소/우선순위 변경(Task 020) + 첨부 이미지
+전량 포함 보장(Task 021) + 계정 사전 로그인(prelogin.py)까지는 커밋/푸시 완료
+(`505f827`, `origin/main`). 이번 세션의 크롬 kill/재로그인 경쟁 조건 수정
+(`pipeline.py`의 `_chrome_account_lock` 추가, `tests/test_publish.py` 2건 추가)은
+**아직 커밋되지 않음** — 사용자가 커밋/푸시를 요청하면 이 두 파일이 대상이다.
