@@ -278,6 +278,9 @@ PUBLISH_TIMEOUT_SEC = 1_200
 # .env 하나에서만 자격증명을 읽지만(변경 금지 대상), python-dotenv의 load_dotenv()가 이미
 # 설정된 환경변수를 덮어쓰지 않는 점을 이용해 서브프로세스 실행 시 env로 자격증명을
 # 주입한다(build_publisher_env 참조) — NaverAutoWrite 코드/CLI 계약은 그대로 둔다.
+# 오케스트레이터(pipeline.py)는 항상 accounts.json에서 계정을 찾아 env로 주입하며(계정이
+# 하나도 없으면 발행 자체를 실패 처리), NaverAutoWrite/.env는 더 이상 자격증명 출처로 쓰지
+# 않는다 — 이 저장소 안에서는 accounts.json만 사용한다(사용자 요청).
 # ---------------------------------------------------------------------------
 ACCOUNTS_JSON_PATH = _WORK_ROOT / "accounts.json"
 
@@ -310,12 +313,12 @@ def publisher_session_file(account_id: str) -> Path:
 def build_publisher_env(account: "Account | None") -> dict[str, str] | None:
     """계정별 자격증명을 담은 서브프로세스 환경변수 dict를 만든다.
 
-    account가 None이면(계정 미지정) None을 반환해 subprocess_runner.run이 현재 프로세스의
-    환경변수를 그대로 쓰게 한다(기존 동작과 동일 — NaverAutoWrite/.env의 기본 계정 사용).
+    호출부(run_publish/run_prelogin)는 항상 accounts.json에서 찾은 계정을 넘기며, 계정을
+    하나도 못 찾으면 발행 자체를 실패 처리하므로 account가 None으로 들어오는 경우는 없다.
     account가 주어지면 os.environ을 복사한 뒤 NAVER_ID/NAVER_PW/NAVER_BLOG_ID/
     NAVER_CATEGORY만 그 계정 값으로 덮어쓴다. NaverAutoWrite/config.py의 load_dotenv()는
-    이미 설정된 환경변수를 덮어쓰지 않으므로(python-dotenv 기본 동작), 이 값이 .env보다
-    우선 적용된다 — NaverAutoWrite 코드는 전혀 건드리지 않는다.
+    이미 설정된 환경변수를 덮어쓰지 않으므로(python-dotenv 기본 동작), 이 값이 (남아 있다면)
+    .env보다 우선 적용된다 — NaverAutoWrite 코드는 전혀 건드리지 않는다.
     """
     if account is None:
         return None

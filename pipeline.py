@@ -221,8 +221,9 @@ def save_input_defaults(defaults: InputDefaults) -> None:
 def load_accounts() -> list[config.Account]:
     """accounts.json을 읽어 계정 목록을 돌려준다(다중 네이버 계정 발행 기능).
 
-    tasks.json과 같은 이유로 파일이 없거나 손상되면 빈 목록으로 시작한다 — 계정 정보가
-    없어도 기존 동작(NaverAutoWrite/.env의 기본 계정 사용)으로 자연히 폴백하기 때문이다.
+    tasks.json과 같은 이유로 파일이 없거나 손상되면 빈 목록으로 시작한다 — 이 경우
+    run_publish/run_prelogin은 발행 계정이 없다는 에러로 실패한다(더 이상
+    NaverAutoWrite/.env로 폴백하지 않음 — accounts.json만 자격증명 출처로 사용).
     """
     if not config.ACCOUNTS_JSON_PATH.exists():
         return []
@@ -249,7 +250,8 @@ def find_account(account_id: str | None) -> config.Account | None:
     """account_id에 해당하는 계정을 accounts.json에서 찾는다.
 
     account_id가 없거나(계정 미지정 태스크) 목록에서 찾지 못하면(삭제된 계정 등) None을
-    반환한다 — 호출부는 None일 때 NaverAutoWrite/.env의 기본 계정으로 폴백한다.
+    반환한다. 호출부는 account_id 미지정 시 default_account_id()로 accounts.json의
+    기본 계정을 먼저 구해서 넘겨야 한다(더 이상 .env로 폴백하지 않음).
     """
     if not account_id:
         return None
@@ -262,10 +264,11 @@ def find_account(account_id: str | None) -> config.Account | None:
 def account_label(account_id: str | None) -> str:
     """account_id에 대응하는 표시용 라벨을 찾는다(config.ai_model_label과 같은 패턴).
 
-    미지정이거나 accounts.json에서 찾지 못하면(삭제된 계정 등) "기본 계정"으로 표시한다.
+    미지정이면 accounts.json의 기본 계정을, 그마저도 없으면(등록된 계정이 없음)
+    "계정 없음"으로 표시한다.
     """
-    account = find_account(account_id)
-    return account["label"] if account is not None else "기본 계정 (.env)"
+    account = find_account(account_id or default_account_id())
+    return account["label"] if account is not None else "계정 없음"
 
 
 _DEFAULT_ACCOUNT_KEY = "__default__"
@@ -1013,6 +1016,10 @@ def run_prelogin(
     문제, 타임아웃 등) 예외를 삼키고 로그만 남긴다 — 실제 로그인 성사 여부와 재시도는
     이후 run_publish가 그대로 책임진다.
 
+    account_id 미지정 시 default_account_id()로 accounts.json의 기본 계정을 구하며,
+    accounts.json에 등록된 계정이 하나도 없으면(더 이상 .env로 폴백하지 않음) 실패로
+    처리한다.
+
     반환값(bool)은 성공 여부다 — app.py의 "로그인" 버튼(PreloginWorker)이 사용자에게
     성공/실패를 알려주기 위해 쓰며, 기존 백그라운드 사전 로그인 호출부(PipelineWorker.run)는
     그대로 결과를 무시한다.
@@ -1020,8 +1027,12 @@ def run_prelogin(
     if cancel_event is not None and cancel_event.is_set():
         return False
 
-    account = find_account(account_id)
-    identity = account_id if account is not None else _DEFAULT_ACCOUNT_KEY
+    resolved_account_id = account_id or default_account_id()
+    account = find_account(resolved_account_id)
+    if account is None:
+        logger.error("run_prelogin: accounts.json에 등록된 계정이 없어 사전 로그인을 진행할 수 없음")
+        return False
+    identity = resolved_account_id
 
     # _chrome_account_lock: run_publish(동일 태스크의 발행 단계)와 크롬 kill/재기동/
     # identity 저장 구간이 겹치지 않도록 직렬화한다(위 _chrome_account_lock 정의부 참조).
@@ -1032,8 +1043,8 @@ def run_prelogin(
             _kill_chrome_on_cdp_port()
 
         publisher_dir = config.PUBLISHER_DIR.resolve()
-        session_file = config.publisher_session_file(account_id) if account is not None else None
-        blog_id = account["blog_id"] if account is not None else None
+        session_file = config.publisher_session_file(resolved_account_id)
+        blog_id = account["blog_id"]
         args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_prelogin_args(
             blog_id=blog_id, session_file=session_file, login_mode=login_mode
         )
@@ -1069,18 +1080,28 @@ def run_publish(
 
     account_id가 주어지면(다중 네이버 계정 발행 기능) accounts.json에서 해당 계정을 찾아
     그 계정의 자격증명/블로그ID를 서브프로세스 환경변수로 주입하고, 계정 전용 세션(크롬
-    프로필) 경로를 사용한다. 못 찾으면(삭제된 계정 등) 경고만 남기고 기본 계정(.env)으로
-    폴백한다. 직전에 발행에 쓴 계정과 이번 계정이 다르면, 발행 전에 먼저 크롬을 종료해
-    이전 계정 프로필이 그대로 재사용되는 것을 막는다(_kill_chrome_on_cdp_port 참조).
+    프로필) 경로를 사용한다. 못 찾으면(삭제된 계정 등) default_account_id()로 accounts.json의
+    기본 계정으로 폴백하고, accounts.json에 등록된 계정이 하나도 없으면 실패로 처리한다
+    (더 이상 NaverAutoWrite/.env로 폴백하지 않음 — accounts.json만 자격증명 출처로 사용).
+    직전에 발행에 쓴 계정과 이번 계정이 다르면, 발행 전에 먼저 크롬을 종료해 이전 계정
+    프로필이 그대로 재사용되는 것을 막는다(_kill_chrome_on_cdp_port 참조).
     """
     if cancel_event is not None and cancel_event.is_set():
         return "canceled", None
 
-    account = find_account(account_id)
+    resolved_account_id = account_id or default_account_id()
+    account = find_account(resolved_account_id)
     if account_id and account is None:
-        logger.warning("run_publish: account_id=%s를 accounts.json에서 찾을 수 없어 기본 계정으로 진행함", account_id)
+        logger.warning(
+            "run_publish: account_id=%s를 accounts.json에서 찾을 수 없어 기본 계정으로 진행함", account_id
+        )
+        resolved_account_id = default_account_id()
+        account = find_account(resolved_account_id)
+    if account is None:
+        logger.error("run_publish: accounts.json에 등록된 계정이 없어 발행할 수 없음")
+        return "failed", None
 
-    identity = account_id if account is not None else _DEFAULT_ACCOUNT_KEY
+    identity = resolved_account_id
 
     # _chrome_account_lock: 같은 태스크의 run_prelogin(백그라운드 스레드)이 아직 크롬을
     # kill/재기동/재로그인하는 중이면 그 작업이 끝날 때까지 기다린다 — 그렇지 않으면
@@ -1093,8 +1114,8 @@ def run_publish(
             _kill_chrome_on_cdp_port()
 
         publisher_dir = config.PUBLISHER_DIR.resolve()
-        session_file = config.publisher_session_file(account_id) if account is not None else None
-        blog_id = account["blog_id"] if account is not None else None
+        session_file = config.publisher_session_file(resolved_account_id)
+        blog_id = account["blog_id"]
         args = [config.DEFAULT_INTERPRETER_CONFIG["publisher"]] + config.build_publisher_args(
             md_path.resolve(), blog_id=blog_id, session_file=session_file, login_mode=login_mode
         )

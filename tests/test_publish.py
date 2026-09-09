@@ -17,7 +17,15 @@ def test_run_prelogin_and_run_publish_never_touch_chrome_concurrently(tmp_path, 
     않음을 검증한다.
     """
     monkeypatch.setattr(pipeline.config, "LAST_ACCOUNT_JSON_PATH", tmp_path / "last_account.json")
-    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    fake_account = {
+        "id": "acc1",
+        "label": "테스트 계정",
+        "naver_id": "tester",
+        "naver_pw": "pw",
+        "blog_id": "tester",
+        "category": "",
+    }
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [fake_account])
     monkeypatch.setattr(pipeline, "_kill_chrome_on_cdp_port", lambda *a, **kw: None)
 
     active = 0
