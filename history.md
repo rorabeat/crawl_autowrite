@@ -2746,3 +2746,54 @@ Playwright의 `connect_over_cdp`는 `Target.setAutoAttach` 뒤 **기존 모든 �
 
 응
 
+
+**AI 처리 요약:** 커밋·푸시 완료했습니다 (`077d5ba..2b39bcd`).  - 이번에도 `agents/` 폴더의 무관한 변경(AGENTS여행단축.md 삭제/AGENTS여행_오키나와.md 신규)은 제외했습니다 — 워킹 트리에 그대로 남아 있으니 필요하시면 확인 후 알려주세요. - 다음
+
+## 2026-09-09 21:34:47 - 사용자 프롬프트
+
+네이버 로그인 비밀번호 저장하고 있는 파일 뭐야
+
+
+**AI 처리 요약:** 네이버 로그인 비밀번호는 `NaverAutoWrite/.env` 파일에 `NAVER_PW`라는 이름의 환경변수로 저장되어 있습니다.  - 위치: `C:\gitRepo\crawl_autowrite\NaverAutoWrite\.env` - 관련 키: `NAVER_ID`, `NAVER_PW`, `NAVER_BLOG_ID`, `NAVER_CATEGORY`(선택) - `NaverAutoWrite/
+
+## 2026-09-09 21:35:21 - 사용자 프롬프트
+
+c:\gitRepo\crawl_autowrite\accounts.json 이 파일 아니야
+
+
+**AI 처리 요약:** 네, 맞습니다. `C:\gitRepo\crawl_autowrite\accounts.json`에 여러 네이버 계정의 로그인 정보(`naver_id`, `naver_pw`)가 평문으로 저장되어 있습니다. 총 3개 계정(`d2njjang`, `earlybirdyes`, `picknoteplus`)이 등록되어 있네요.  이 파일이 git에 추적되고 
+
+## 2026-09-09 21:35:54 - 사용자 프롬프트
+
+- 위치: C:\gitRepo\crawl_autowrite\NaverAutoWrite\.env
+- 관련 키: NAVER_ID, NAVER_PW, NAVER_BLOG_ID, NAVER_CATEGORY(선택)
+- NaverAutoWrite/config.py에서 이 .env를 로드해서 사용합니다. === 그럼 이건 뭐야
+
+
+**AI 처리 요약:** 네, 그것도 맞습니다. 정리하면 이 저장소에는 네이버 로그인 비밀번호가 **두 곳**에 저장되어 있습니다.  1. `C:\gitRepo\crawl_autowrite\NaverAutoWrite\.env`    - 단일 계정용 (`NAVER_ID=earlybirdyes`, `NAVER_PW=tpxkrrl01!@#`)    - `NaverAutoWrite/config.py
+
+## 2026-09-09 21:36:16 - 사용자 프롬프트
+
+json 파일만 사용하도록 수정해줘
+
+
+**AI 처리 요약:** 오케스트레이터(`pipeline.py`/`config.py`) 코드를 수정해서 이제 발행 시 **항상 `accounts.json`에서 계정을 찾아 자격증명을 서브프로세스에 주입**하고, `accounts.json`에 계정이 하나도 없으면 발행을 실패 처리하도록 바꿨습니다(더 이상
+
+## 2026-09-09 21:46:53 - 사용자 프롬프트
+
+api 호출 키 저장은 어디에 되어 있어
+
+
+**AI 처리 요약:** API 호출 키는 저장소 안 세 곳의 `.env` 파일에 나뉘어 저장되어 있습니다.  1. **`NaverBlogCrawlingByPlayWright/.env`** (크롤링 서브프로젝트)    - `NAVER_SEARCH_ACCESS_LICENSE_KEY`, `NAVER_SEARCH_SECRET_KEY`, `NAVER_SEARCH_CUSTOMER_ID` — 네이버 검색광고 API
+
+## 2026-09-09 21:53:26 - 사용자 프롬프트
+
+[Image #4] 비밀번호 자꾸 저장한것과 다르게 나오고 있어
+
+
+**AI 처리 요약:** 전원 통과 확인했습니다. 컨텍스트 문서를 갱신하고 커밋할까요, 아니면 바로 커밋·푸시할까요? 
+
+## 2026-09-09 21:54:51 - 사용자 프롬프트
+
+커밋하고 푸시해줘
+

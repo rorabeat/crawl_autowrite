@@ -310,12 +310,20 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
             _mark_login_success(config)
             return
 
+        # 크롬 자체 비밀번호 관리자가 이 사이트의 저장된 아이디/비번을 페이지 로드 시
+        # 필드에 자동으로 채워 넣는 경우가 있다(공유 프로필을 계속 재사용하는 이 프로젝트
+        # 설계상 흔함). 클릭만 하고 바로 붙여넣으면 커서 위치에 "삽입"만 될 뿐 기존
+        # 자동완성 값이 지워지지 않아, 저장된 값과 방금 붙여넣은 값이 뒤섞인 문자열이
+        # 되어 로그인이 실패한다(사용자 리포트: "비밀번호가 저장한 것과 다르게 나옴").
+        # Control+A로 전체 선택 후 붙여넣어 항상 필드를 통째로 교체한다.
         pyperclip.copy(config.naver_id)
         page.click("#id")
+        page.keyboard.press("Control+A")
         page.keyboard.press("Control+V")
 
         pyperclip.copy(config.naver_pw)
         page.click("#pw")
+        page.keyboard.press("Control+A")
         page.keyboard.press("Control+V")
 
         _click_login_button(page)
