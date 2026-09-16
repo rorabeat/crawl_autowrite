@@ -53,6 +53,17 @@ _CDP_READY_TIMEOUT_S = 20
 # 짧게 잡는다.
 _CDP_CONNECT_TIMEOUT_MS = 15_000
 
+# 이미 로그인된 프로필에서 nidlogin.login이 네이버 홈으로 리다이렉트되기까지 기다려 줄
+# 최대 시간. 로그인 안 된 경우엔 이 시간만큼만 추가로 대기한 뒤 로그인 단계로 넘어간다.
+_LOGGED_IN_REDIRECT_TIMEOUT_MS = 8_000
+
+# login_mode="manual"에서 사람이 직접 로그인을 완료할 때까지 무제한 대기하면, 여러
+# 작업을 연속 실행하는 무인 배치 상황(사용자 리포트: 자리를 비운 사이 여러 작업이
+# 연달아 발행 단계에서 로그인 대기로 멈춰 실패 처리됨)에서 옆에 사람이 없으면 그대로
+# PUBLISH_TIMEOUT_SEC까지 블로킹되다 실패한다. 이 시간 안에 사람이 로그인을 완료하지
+# 않으면 저장된 계정으로 자동 로그인(클립보드 붙여넣기)으로 전환한다.
+_MANUAL_LOGIN_FALLBACK_TIMEOUT_MS = 60_000
+
 
 def _cdp_url() -> str:
     return f"http://127.0.0.1:{_CDP_PORT}"
@@ -227,11 +238,24 @@ def create_browser_context(
     except Exception:
         pass
 
+    # 이미 로그인된 상태면 nid.naver.com이 로그인 페이지 대신 네이버 홈으로 보내는데,
+    # 이 리다이렉트가 domcontentloaded 직후가 아니라 약간 뒤(스크립트 실행 후)에
+    # 일어나는 경우가 있다. goto 직후의 URL만 보고 판정하면 실제로는 로그인돼 있는데도
+    # "신규 로그인 필요"로 오판해 매 발행마다 로그인을 다시 하게 되므로(사용자 리포트:
+    # "글 쓸 때마다 로그인한다"), 잠시 동안 로그인 페이지를 벗어나는지 기다린 뒤 판정한다.
+    # 로그인이 안 된 상태라면 로그인 페이지에 그대로 머물러 타임아웃으로 빠져나온다.
+    try:
+        page.wait_for_url(_left_nidlogin, timeout=_LOGGED_IN_REDIRECT_TIMEOUT_MS)
+    except Exception:
+        pass
+
     # goto가 (드물게) 예외로 실패하면 page.url이 새 탭의 초기값("about:blank") 등으로
     # 남을 수 있는데, 이는 "nidlogin.login"을 포함하지 않으므로 자칫 로그인된 것으로
     # 잘못 판정될 수 있다 — 실제로 nid.naver.com 계열 URL에 도달했을 때만 신뢰한다.
     current_url = page.url
     reused = bool(current_url) and "naver.com" in current_url and _left_nidlogin(current_url)
+    if reused:
+        print("이미 로그인된 크롬 세션입니다 — 로그인 단계를 건너뜁니다.")
     if had_login_marker and not reused:
         print(
             "로그인 완료 마커는 있지만 실제로는 로그인 상태가 아닙니다(세션 만료 등) — 재로그인을 진행합니다.",
@@ -280,6 +304,29 @@ def _mark_login_success(config: Config) -> None:
     (Path(config.session_file).parent / _LOGIN_MARKER_NAME).touch()
 
 
+def _fill_credentials_and_submit(page: Any, config: Config) -> None:
+    """#id/#pw에 클립보드 붙여넣기로 자격증명을 입력하고 로그인 버튼을 클릭한다.
+
+    크롬 자체 비밀번호 관리자가 이 사이트의 저장된 아이디/비번을 페이지 로드 시
+    필드에 자동으로 채워 넣는 경우가 있다(공유 프로필을 계속 재사용하는 이 프로젝트
+    설계상 흔함). 클릭만 하고 바로 붙여넣으면 커서 위치에 "삽입"만 될 뿐 기존
+    자동완성 값이 지워지지 않아, 저장된 값과 방금 붙여넣은 값이 뒤섞인 문자열이
+    되어 로그인이 실패한다(사용자 리포트: "비밀번호가 저장한 것과 다르게 나옴").
+    Control+A로 전체 선택 후 붙여넣어 항상 필드를 통째로 교체한다.
+    """
+    pyperclip.copy(config.naver_id)
+    page.click("#id")
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Control+V")
+
+    pyperclip.copy(config.naver_pw)
+    page.click("#pw")
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Control+V")
+
+    _click_login_button(page)
+
+
 def login(context: Any, config: Config, login_mode: str = "auto") -> None:
     """nidlogin 페이지에서 로그인을 수행한다.
 
@@ -287,8 +334,12 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
     입력 후 (F009) CAPTCHA/2FA/신규기기 인증 감지 시에만 수동 개입 대기.
     login_mode="manual": 자격증명 자동 입력을 아예 하지 않고, 로그인 페이지를 연 채로
     아이디/비밀번호 입력부터 인증까지 전부 사람이 직접 완료하도록 대기한다
-    (클립보드 자동 붙여넣기가 "이상 로그인 시도"로 자주 탐지되는 계정을 위함).
-    (F011) auto 모드에서만 아이디/비밀번호 오류를 판별해 LoginFailedError를 던진다.
+    (클립보드 자동 붙여넣기가 "이상 로그인 시도"로 자주 탐지되는 계정을 위함). 다만
+    _MANUAL_LOGIN_FALLBACK_TIMEOUT_MS 안에 사람이 로그인을 끝내지 못하면(무인 배치
+    실행 등으로 옆에 아무도 없는 경우), 계속 무제한 대기하지 않고 저장된 계정으로
+    자동 로그인으로 전환한다(사용자 요청: 로그인이 안 되어 발행이 실패 처리되는 문제).
+    (F011) 아이디/비밀번호 오류를 판별하면 자동 로그인 시도 시점에 LoginFailedError를
+    던진다.
     """
     # create_browser_context가 연결 직후 이미 첫 탭을 로그인 페이지로 이동시켜 두므로,
     # 그 탭을 그대로 재사용한다(탭이 중복으로 쌓이지 않도록).
@@ -298,35 +349,25 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
         page.goto(NIDLOGIN_URL)
         wait_for_selector(page, "#id")
 
+        fell_back_from_manual = False
         if login_mode == "manual":
             print(
                 "수동 로그인 모드: 자동 입력 없이 브라우저에서 아이디/비밀번호 입력부터 인증까지 직접 진행해주세요.",
                 file=sys.stderr,
             )
             try:
-                page.wait_for_url(_left_nidlogin, timeout=CHALLENGE_TIMEOUT_MS)
-            except Exception as exc:
-                raise AuthChallengeTimeoutError("수동 로그인을 제한 시간 내에 완료하지 못했습니다.") from exc
-            _mark_login_success(config)
-            return
+                page.wait_for_url(_left_nidlogin, timeout=_MANUAL_LOGIN_FALLBACK_TIMEOUT_MS)
+                _mark_login_success(config)
+                return
+            except Exception:
+                print(
+                    f"수동 로그인이 {_MANUAL_LOGIN_FALLBACK_TIMEOUT_MS // 1000}초 내에 완료되지 않아 "
+                    "저장된 계정으로 자동 로그인을 시도합니다.",
+                    file=sys.stderr,
+                )
+                fell_back_from_manual = True
 
-        # 크롬 자체 비밀번호 관리자가 이 사이트의 저장된 아이디/비번을 페이지 로드 시
-        # 필드에 자동으로 채워 넣는 경우가 있다(공유 프로필을 계속 재사용하는 이 프로젝트
-        # 설계상 흔함). 클릭만 하고 바로 붙여넣으면 커서 위치에 "삽입"만 될 뿐 기존
-        # 자동완성 값이 지워지지 않아, 저장된 값과 방금 붙여넣은 값이 뒤섞인 문자열이
-        # 되어 로그인이 실패한다(사용자 리포트: "비밀번호가 저장한 것과 다르게 나옴").
-        # Control+A로 전체 선택 후 붙여넣어 항상 필드를 통째로 교체한다.
-        pyperclip.copy(config.naver_id)
-        page.click("#id")
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Control+V")
-
-        pyperclip.copy(config.naver_pw)
-        page.click("#pw")
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Control+V")
-
-        _click_login_button(page)
+        _fill_credentials_and_submit(page, config)
 
         try:
             page.wait_for_url(_left_nidlogin, timeout=DEFAULT_TIMEOUT_MS)
@@ -345,8 +386,16 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
             "브라우저에서 직접 인증을 완료해주세요.",
             file=sys.stderr,
         )
+        # 원래부터 auto 모드였다면(사람이 화면을 보고 있을 가능성이 있는 대화형 실행)
+        # 기존과 동일하게 무제한 대기한다. 반면 수동 로그인 타임아웃으로 방금 자동
+        # 로그인으로 전환된 경우엔 애초에 옆에 사람이 없어서 수동 대기가 실패했던
+        # 것이므로, 챌린지도 무제한 대기하지 않고 같은 타임아웃 후 실패시켜
+        # login_with_recovery의 "크롬 재실행 후 재시도"로 넘긴다.
+        challenge_timeout = (
+            _MANUAL_LOGIN_FALLBACK_TIMEOUT_MS if fell_back_from_manual else CHALLENGE_TIMEOUT_MS
+        )
         try:
-            page.wait_for_url(_left_nidlogin, timeout=CHALLENGE_TIMEOUT_MS)
+            page.wait_for_url(_left_nidlogin, timeout=challenge_timeout)
         except Exception as exc:
             raise AuthChallengeTimeoutError(
                 "인증 챌린지를 제한 시간 내에 완료하지 못했습니다."
@@ -354,6 +403,49 @@ def login(context: Any, config: Config, login_mode: str = "auto") -> None:
 
         _mark_login_success(config)
     finally:
-        # 공유 크롬 컨텍스트에 연 로그인 탭이므로, 다음 실행이 같은 컨텍스트를 이어
-        # 쓸 때 탭이 계속 쌓이지 않도록 끝나면 반드시 닫는다.
-        page.close()
+        # 이 탭이 컨텍스트(크롬 창)의 유일한 탭인 경우 page.close()를 호출하면 탭이
+        # 아니라 창 자체가 사라져 버려, 곧이어 main.py가 호출하는 context.new_page()가
+        # "Target.createTarget: Failed to open a new tab"로 실패한다(실측: 로그인 성공
+        # 직후 CDP 컨텍스트에 남은 탭이 0개가 되면서 발생). 탭을 닫는 대신 about:blank로
+        # 되돌려 창을 살려두면, 다음 실행의 create_browser_context가 이 탭을 그대로
+        # 재사용하므로("탭이 계속 쌓이지 않도록") 원래 의도도 그대로 유지된다.
+        try:
+            page.goto("about:blank")
+        except Exception:
+            pass
+
+
+def login_with_recovery(
+    playwright: Any,
+    context: Any,
+    config: Config,
+    login_mode: str,
+    headless: bool,
+) -> Any:
+    """login()을 시도하고, 그래도 실패(AuthChallengeTimeoutError)하면 크롬을 재시작한
+    뒤 자동 로그인으로 한 번 더 시도한다 (사용자 요청: 로그인 실패로 발행이 계속
+    실패 처리되는 문제).
+
+    아이디/비밀번호 자체가 틀린 경우(LoginFailedError)는 크롬을 재시작해도 결과가
+    같으므로 재시도하지 않고 그대로 올린다. 재시도는 항상 login_mode="auto"로
+    수행한다 — 이미 한 번 시간 안에 로그인이 안 된 상황(무인 배치 실행 등으로 사람이
+    없거나 첫 시도의 크롬 상태가 꼬인 경우)에서 수동 로그인을 다시 기다려봐야 똑같이
+    타임아웃되기 때문이다.
+
+    반환값은 실제로 사용해야 할 context다 — 재시도가 일어나면 크롬을 통째로 죽이고
+    새로 띄우므로, 기존 context는 죽은 크롬에 붙어 있던 연결이라 더 이상 쓸 수 없다.
+    호출부(main.py)는 항상 이 함수의 반환값을 이어서 사용해야 한다.
+    """
+    try:
+        login(context, config, login_mode)
+        return context
+    except AuthChallengeTimeoutError:
+        print(
+            "로그인이 계속 실패하여 크롬을 재시작한 뒤 자동 로그인으로 다시 시도합니다.",
+            file=sys.stderr,
+        )
+        _kill_chrome_process()
+        new_context, reused = create_browser_context(playwright, headless, config.session_file)
+        if not reused:
+            login(new_context, config, "auto")
+        return new_context

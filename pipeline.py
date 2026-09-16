@@ -999,13 +999,12 @@ def run_prelogin(
     account_id: str | None = None,
     cancel_event: threading.Event | None = None,
 ) -> bool:
-    """발행 단계보다 먼저 크롬을 띄워 로그인을 미리 마쳐 둔다(사용자 요청).
+    """발행 단계보다 먼저 크롬을 띄워 로그인을 미리 마쳐 둔다(입력 탭 "로그인" 버튼 전용).
 
-    기존에는 run_publish가 파이프라인 맨 마지막(크롤링/AI 생성/이미지 생성이 모두 끝난
-    뒤)에야 크롬을 띄워서, 로그인이 필요한 순간에 사용자가 붙어서 기다려야 했다. 이 함수는
-    태스크가 시작되자마자(app.py의 PipelineWorker.run 참조) run_pipeline과는 별도의
-    백그라운드 스레드에서 먼저 호출되어, 크롤링/생성이 진행되는 동안 사용자가 미리 로그인을
-    마칠 수 있게 한다.
+    예전에는 태스크 시작과 동시에 app.py의 PipelineWorker.run이 이 함수를 백그라운드로
+    자동 호출했지만, 작업마다 사전 로그인 + 발행 두 번 로그인 페이지가 열리는 문제로
+    자동 호출은 제거했다(사용자 요청: 로그인은 글쓰기(발행) 시작 시점에만). 지금은
+    사용자가 "로그인" 버튼을 눌렀을 때(PreloginWorker)만 호출된다.
 
     run_publish와 같은 계정 판별/크롬 재시작(_kill_chrome_on_cdp_port) 로직을 그대로
     따르고, 성공하면 _save_last_publish_identity로 "마지막 로그인 계정"을 미리 기록해

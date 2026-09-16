@@ -849,8 +849,9 @@ class InputTab(QWidget):
 
         PreloginWorker가 headed 크롬을 띄우고(CAPTCHA/2FA 등은 그 크롬 창에서 수동으로
         처리), 성공하면 세션 파일이 저장된다 — 이후 같은 계정으로 "대기열에 추가"한
-        글쓰기 작업들은 PipelineWorker.run이 자동으로 호출하는 사전 로그인에서 이미
-        로그인된 세션을 그대로 재사용하므로 재로그인 없이 이어서 발행된다.
+        글쓰기 작업들은 발행 단계(run_publish)에서 이미 로그인된 세션을 그대로
+        재사용하므로 재로그인 없이 이어서 발행된다(작업 시작 시 자동 사전 로그인은
+        더 이상 하지 않는다 — 발행 시점에만 로그인).
         """
         if self._prelogin_worker is not None and self._prelogin_worker.isRunning():
             self.login_status_label.setText("로그인: 이미 진행 중입니다")
@@ -1596,17 +1597,13 @@ class PipelineWorker(QThread):
         self.cancel_event.set()
 
     def run(self) -> None:
-        # 태스크 시작과 동시에 크롬을 미리 띄워 로그인해두면(백그라운드, 결과를 기다리지
-        # 않음) 크롤링/AI 생성이 진행되는 동안 사용자가 미리 로그인을 마칠 수 있어, 파이프라인
-        # 맨 마지막 발행 단계에서야 크롬이 뜨는 바람에 사용자가 거기 붙어서 기다려야 하는
-        # 문제가 없어진다(사용자 요청). run_pipeline과는 완전히 별도 스레드이므로 실패해도
-        # run_pipeline 진행에는 영향 없다 — 실제 로그인 성사 여부는 run_publish가 재확인한다.
-        threading.Thread(
-            target=pipeline.run_prelogin,
-            args=(self.context.login_mode, self.context.account_id, self.cancel_event),
-            daemon=True,
-        ).start()
-
+        # 로그인은 작업 시작 시점이 아니라 실제 발행(글쓰기) 단계(run_publish →
+        # NaverAutoWrite/main.py)에서만 수행한다(사용자 요청). 예전에는 여기서
+        # pipeline.run_prelogin을 백그라운드로 먼저 띄웠는데, 그러면 작업마다 사전 로그인과
+        # 발행 두 번 로그인 페이지가 열려 "글 쓸 때마다 로그인한다"고 느껴졌다. 미리
+        # 로그인해 두고 싶으면 입력 탭의 "로그인" 버튼(PreloginWorker)을 쓰면 된다.
+        # 발행 단계는 같은 계정이면 떠 있는 크롬 세션을 그대로 재사용하고, 직전 발행 계정과
+        # 다를 때만 크롬을 재기동해 다시 로그인한다(pipeline.run_publish 참조).
         result = pipeline.run_pipeline(
             self.context,
             on_step=lambda name, status: self.step_signal.emit(name, status),
@@ -1619,7 +1616,7 @@ class PreloginWorker(QThread):
     """"로그인" 버튼(사용자 요청)에서 pipeline.run_prelogin()을 별도 스레드로 실행한다.
 
     작업을 대기열에 넣지 않고도 미리 원하는 계정으로 로그인만 마쳐 둘 수 있게 한다.
-    PipelineWorker.run이 백그라운드로 조용히 호출하는 것과 같은 함수를 쓰지만, 여기서는
+    사용자가 명시적으로 눌렀을 때만 실행되며(작업 시작 시 자동 사전 로그인은 없음),
     결과(성공/실패)를 finished_signal로 알려 사용자가 로그인 완료 여부를 확인할 수
     있게 한다. 로그인에 성공하면 세션 파일(config.publisher_session_file)이 갱신되므로,
     이후 같은 계정으로 큐에 넣는 작업들은 재로그인 없이 그 세션을 이어서 쓴다.

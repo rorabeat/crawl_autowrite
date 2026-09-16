@@ -115,3 +115,93 @@ account_id 순서 그대로** 진행된다.
 ### 진행 상태
 **구현 완료(2026-08-22).** 상세 변경 내역은 `docs/ROADMAP.md` Task 021 참조.
 전체 테스트 스위트 123건 전원 통과 확인. UI 변경 없음(순수 백엔드 로직).
+
+## 4. 매 발행마다 재로그인 문제 수정 및 작업 시작 시 자동 사전 로그인 제거 (2026-09-10)
+
+- ~~`naver_login.create_browser_context` 로그인 판정을 리다이렉트 대기(8초) 후 수행하도록 보강~~
+- ~~`app.py PipelineWorker.run`의 `run_prelogin` 백그라운드 자동 호출 제거(발행 시점에만 로그인)~~
+- ~~관련 docstring/주석 정리, 테스트 125건 통과 확인~~
+- 실사용 라이브 검증(같은 계정 연속 발행 시 재로그인 없음 확인)
+
+## 5. 계정 전환 시 크롬 kill/재로그인 경쟁 조건 수정 (2026-09-08)
+
+- ~~`pipeline.py`에 `_chrome_account_lock`(threading.Lock) + 취소 인지 획득 헬퍼 추가~~
+- ~~`run_prelogin`/`run_publish` 둘 다 "크롬 identity 비교 → kill → 실행 → identity 저장"
+  구간을 락으로 감싸 직렬화~~
+- ~~테스트 2건 추가(동시 실행 시 겹치지 않음 검증, 락 대기 중 취소 시 즉시 반환 검증),
+  전체 스위트 125건 통과~~
+- 실제 계정 2개로 라이브 검증 미실시(단위 테스트로만 검증) — 이 수정 자체는 유효하나
+  단독으로는 아래 6번(CDP 좀비 타깃)의 발행 실패를 못 막았음이 이후 확인됨
+
+## 6. 크롬 CDP 좀비 타깃으로 인한 발행 실패 수정 (2026-09-09)
+
+- ~~`naver_login.py`에 `_kill_chrome_process()`/`_connect_over_cdp_with_retry()` 추가 —
+  connect_over_cdp를 짧은 타임아웃(15초)으로 먼저 시도, 실패 시 크롬 강제종료 후 재기동해
+  한 번 더 시도~~
+- ~~`create_browser_context`의 `reused` 판정을 `.login_ok` 마커 대신 실제
+  nid.naver.com 접속 결과(로그인 페이지 이탈 여부)로 변경~~
+- ~~`py_compile` 구문 검증(이 서브프로젝트는 pytest 인프라 없음), 오케스트레이터
+  125개 테스트 영향 없음 확인~~
+
+## 7. 로그인 필드 자동완성 삽입 버그 수정 (2026-09-09, 커밋 590994f)
+
+- ~~`naver_login.py login()`의 `#id`/`#pw` 입력을 `click()` 직후 `Control+A`(전체 선택)
+  추가 후 붙여넣기로 변경 — 크롬 저장 비밀번호 자동완성 값과 붙여넣기 값이 섞이는 문제 수정~~
+
+## 8. 로그인 탭 close로 인한 "Failed to open a new tab" 발행 실패 수정 (2026-09-13)
+
+사용자가 실제 발행 시도 시 "로그인 성공" 로그 직후
+`BrowserContext.new_page: Protocol error (Target.createTarget): Failed to open a new tab`로
+실패하는 것을 발견(신규 로그인 경로에서만 재현, `reused=True` 스킵 경로는 무관).
+
+- ~~근본 원인 확인: `naver_login.login()`의 `finally: page.close()`가 CDP 컨텍스트의
+  유일한 탭을 닫아 창 자체가 사라짐 → 직후 `main.py`의 `context.new_page()`가 실패~~
+- ~~`naver_login.py:373` 수정: `page.close()` → `page.goto("about:blank")`(예외 무시)로
+  교체, 탭은 유지하고 내용만 비움~~
+- ~~`py_compile` 구문 검증~~
+- ~~실제 계정으로 라이브 재검증(다음 발행 시도 시 같은 에러 재발 여부 확인) — 이후 세션에서
+  실제로 재검증하고 다음 문제(9번)를 새로 발견함~~
+
+## 9. 로그인 대기 중 발행 실패 시 자동 로그인 전환 + 크롬 재시작 재시도 (2026-09-17)
+
+사용자가 멀티 작업(#42~#44)을 돌렸는데 "발행: running" 상태에서 로그인이 되지 않아
+전부 "발행: failed"로 끝남(수동 로그인 모드로 사람이 옆에 없던 상황으로 추정).
+"일정 시간동안 로그인이 안되면 자동 로그인으로 전환, 그래도 안되면 크롬을 재실행해서
+진행"해달라는 요청.
+
+### 배경 조사 결과
+- 기본 로그인 모드는 `manual`(`app.py:1050` 체크박스 기본 체크)이고, `naver_login.login()`의
+  manual 분기는 `CHALLENGE_TIMEOUT_MS=0`(Playwright에서 0은 "타임아웃 없음")으로 사람이
+  로그인을 끝낼 때까지 **무제한 대기**했다 — 무인/멀티 작업 실행 중 옆에 사람이 없으면
+  `pipeline.PUBLISH_TIMEOUT_SEC`(1200초)까지 블로킹되다 강제 종료되어 실패 처리됨.
+- 로그인 성공 후 인증 챌린지(캡차 등)가 뜬 경우도 동일하게 `CHALLENGE_TIMEOUT_MS=0`
+  무제한 대기라 같은 문제가 있었음.
+
+### 구현 방식 (`NaverAutoWrite/naver_login.py`만 수정, `main.py`/`prelogin.py`는 호출부만 교체)
+- `_MANUAL_LOGIN_FALLBACK_TIMEOUT_MS = 60_000` 추가. `login_mode="manual"`에서 사람이
+  60초 안에 로그인을 못 끝내면, 무제한 대기 대신 저장된 계정으로 자동 로그인(클립보드
+  붙여넣기)으로 전환한다(`_fill_credentials_and_submit`으로 기존 auto 분기 코드를 추출해
+  재사용). 이 폴백 이후 챌린지가 뜨면(사람이 이미 없었다는 뜻이므로) 무제한이 아니라
+  같은 60초만 대기하고 `AuthChallengeTimeoutError`를 던진다 — 원래부터 `auto` 모드였던
+  대화형 실행은 기존과 동일하게 챌린지 무제한 대기 유지(사람이 보고 있을 수 있음).
+- `login_with_recovery(playwright, context, config, login_mode, headless)`(신규): `login()`이
+  `AuthChallengeTimeoutError`를 던지면 `_kill_chrome_process()` + `create_browser_context()`로
+  크롬을 재시작하고 `login_mode="auto"`로 한 번 더 시도한다. 재시작 후 이미 로그인된
+  세션이면(같은 프로필 재사용) 두 번째 `login()` 호출도 건너뜀. `LoginFailedError`(아이디/
+  비밀번호 자체가 틀림)는 크롬을 재시작해도 결과가 같으므로 재시도 없이 그대로 전파.
+  반환값(새 context)을 호출부가 이어서 써야 함(재시작 시 기존 context는 죽은 크롬 연결).
+- `main.py`/`prelogin.py`: `naver_login.login(...)` 호출을
+  `naver_login.login_with_recovery(playwright, context, config, login_mode, headless)`로
+  교체하고 반환된 context를 이어서 사용하도록 수정.
+
+### 진행 상태
+- ~~`python -m py_compile`로 구문 검증(이 서브프로젝트는 pytest 인프라 없음)~~
+- ~~mock 기반 스모크 테스트(스크래치패드, 커밋 대상 아님) 4건으로
+  `login_with_recovery`의 분기(첫 시도 성공/자격증명 오류 즉시 전파/챌린지 타임아웃 시
+  재시작+auto 재시도/재시작 후 세션 재사용 시 재로그인 스킵) 전부 검증~~
+- ~~오케스트레이터 테스트 스위트(`pytest`) 125건 전원 통과 재확인(이 수정과 무관한 영향
+  없음 확인)~~
+- 실제 네이버 계정으로 "수동 로그인 방치 → 60초 후 자동 전환 → 그래도 실패 시 크롬
+  재시작" 전체 흐름 라이브 검증은 아직 안 함(자격증명 필요, 무제한 대기를 실제로
+  60초 넘게 재현해야 하므로 이 세션에서는 불가) — 사용자가 다음 멀티 작업 실행에서
+  로그인 지연 상황이 재발하는지 확인 필요.

@@ -71,7 +71,9 @@ def main() -> int:
         try:
             if not reused:
                 print(f"진행 상황: 신규 로그인 시작 (login-mode={args.login_mode})")
-                naver_login.login(context, config, args.login_mode)
+                context = naver_login.login_with_recovery(
+                    playwright, context, config, args.login_mode, args.headless
+                )
                 print("진행 상황: 로그인 성공")
 
             page = context.new_page()

@@ -207,7 +207,99 @@
 필드 모두). `python -m py_compile`로 구문 검증, 오케스트레이터 125개 테스트 영향
 없음(재실행 전원 통과 확인).
 
+## 매 발행마다 재로그인 문제 수정 + 작업 시작 시 자동 사전 로그인 제거 — 구현 완료 (2026-09-10)
+사용자 리포트: "글 쓸 때마다 로그인하는 것 같다. 한 번만 로그인하고 이전과 아이디가
+다른 경우에만 다시 로그인하도록, 그리고 글 시작 전 로그인은 빼고 글을 쓰기 시작할 때
+로그인하도록" 변경 요청.
+
+### 원인
+- `NaverAutoWrite/naver_login.py:create_browser_context`가 `nidlogin.login`으로 goto한
+  직후(domcontentloaded 시점)의 URL만 보고 로그인 여부(`reused`)를 판정했다. 로그인된
+  프로필에서 네이버 홈으로의 리다이렉트가 약간 늦게 일어나면 "신규 로그인 필요"로 오판해
+  같은 계정인데도 매번 자동 입력 로그인을 다시 했다.
+- `app.py:PipelineWorker.run`이 작업 시작과 동시에 `pipeline.run_prelogin`을 백그라운드
+  스레드로 호출해, 작업당 로그인 페이지가 사전 로그인 + 발행 두 번 열렸다.
+
+### 변경 내용
+- `naver_login.py`: `_LOGGED_IN_REDIRECT_TIMEOUT_MS = 8_000` 추가. goto 후
+  `page.wait_for_url(_left_nidlogin, timeout=8s)`로 로그인 페이지를 벗어나는지 기다린 뒤
+  `reused`를 판정한다(로그인 안 된 경우엔 8초 추가 대기 후 기존대로 로그인 단계 진행).
+  reused면 "이미 로그인된 크롬 세션입니다 — 로그인 단계를 건너뜁니다." 출력.
+- `app.py`: `PipelineWorker.run`의 `run_prelogin` 백그라운드 스레드 호출 제거. 로그인은
+  `run_publish`(→`main.py`) 시점에만 일어난다. 입력 탭 "로그인" 버튼(`PreloginWorker`)은
+  그대로 유지(사용자가 원할 때만 수동 사전 로그인).
+- `pipeline.py`: `run_prelogin` docstring만 갱신(함수/락 로직은 그대로 — 로그인 버튼과
+  `run_publish`가 동시에 크롬을 건드리는 경우를 여전히 `_chrome_account_lock`이 보호).
+- 계정 전환 시 동작은 변경 없음: `run_publish`가 `last_account.json` identity와 다르면
+  `_kill_chrome_on_cdp_port`로 크롬을 재기동하고 재로그인(네이버 로그인 쿠키는 세션
+  쿠키라 크롬 재기동 후엔 어차피 재로그인 필요).
+- 테스트 125건 전원 통과(`run_prelogin`을 monkeypatch하던 기존 테스트도 그대로 유효).
+- 브라우저 확장 미연결로 실제 네이버 리다이렉트 타이밍은 라이브 검증하지 못함 — 사용자
+  실사용에서 같은 계정 연속 발행 시 로그인 화면이 다시 뜨는지 확인 필요.
+
+## 로그인 탭 close로 인한 발행 실패("Failed to open a new tab") 수정 — 구현 완료 (2026-09-13)
+사용자가 실제 발행을 돌렸을 때 로그: "진행 상황: 로그인 성공" 직후
+`BrowserContext.new_page: Protocol error (Target.createTarget): Failed to open a new tab`로
+실패(`NaverAutoWrite/main.py:77`).
+
+### 근본 원인
+- `naver_login.py:login()`의 `finally`가 로그인 탭을 `page.close()`로 닫았는데, 신규
+  로그인 시 그 탭이 CDP로 붙어있는 컨텍스트(크롬 창)의 **유일한 탭**이었다. 마지막
+  탭을 닫으면 창 자체가 사라지고, 곧바로 `main.py`가 호출하는 `context.new_page()`가
+  창이 없는 컨텍스트에 새 타깃을 만들지 못해 실패한다. `reused=True`(재로그인 스킵)
+  경로는 `login()`을 아예 안 타므로 이 버그가 드러나지 않았다 — 신규 로그인 시에만
+  재현되는 것과 사용자 로그가 정확히 일치.
+
+### 무엇이 바뀌었는지
+- `NaverAutoWrite/naver_login.py:373` `login()`의 `finally: page.close()`를
+  `page.goto("about:blank")`(예외 무시)로 교체 — 탭은 살려두고 내용만 비운다. 다음
+  실행의 `create_browser_context`가 `context.pages[0]`로 이 탭을 그대로 재사용하므로
+  "탭이 계속 쌓이지 않게 한다"는 원래 의도도 그대로 유지됨.
+- `python -m py_compile`로 구문 검증만 함(이 서브프로젝트는 pytest 인프라 없음,
+  기존과 동일). 오케스트레이터 테스트 스위트는 영향 없음(별도 프로세스).
+- **아직 커밋 안 됨.** 실제 계정으로 라이브 재검증 필요(사용자가 다음 발행 시도 시
+  같은 에러가 재발하지 않는지 확인).
+
+## 로그인 대기 중 발행 실패 시 자동 로그인 전환 + 크롬 재시작 재시도 — 구현 완료 (2026-09-17)
+사용자가 멀티 작업(#42~#44)을 돌렸는데 발행 단계에서 로그인이 안 돼 전부 "발행: failed"로
+끝난 것을 리포트. 상세 이력은 `memory-bank/planAndTask.md` "9. 로그인 대기 중 발행 실패 시
+자동 로그인 전환 + 크롬 재시작 재시도" 참조.
+
+### 근본 원인
+- 기본 로그인 모드가 `manual`(`app.py:1050` 체크박스 기본 체크)인데,
+  `NaverAutoWrite/naver_login.py`의 manual 로그인 분기가 `CHALLENGE_TIMEOUT_MS=0`
+  (Playwright에서 무제한 대기)으로 사람이 로그인을 끝낼 때까지 기다렸다 — 무인/멀티
+  작업 실행 중 옆에 사람이 없으면 `pipeline.PUBLISH_TIMEOUT_SEC`(1200초) 뒤 강제
+  종료되어 실패 처리됨.
+
+### 무엇이 바뀌었는지 (`NaverAutoWrite/naver_login.py`, `main.py`, `prelogin.py`)
+- `naver_login.py`: `_MANUAL_LOGIN_FALLBACK_TIMEOUT_MS=60_000` 추가. manual 모드에서
+  60초 안에 사람이 로그인을 못 끝내면 저장된 계정으로 자동 로그인(클립보드 붙여넣기,
+  `_fill_credentials_and_submit`로 기존 auto 로직 추출)으로 자동 전환. 이 폴백 이후
+  챌린지가 뜨면 무제한이 아니라 같은 60초만 대기 후 `AuthChallengeTimeoutError`.
+  (원래부터 `auto` 모드였던 대화형 실행의 챌린지 무제한 대기는 그대로 유지.)
+- `login_with_recovery()`(신규, `naver_login.py`): `AuthChallengeTimeoutError`가 나면
+  `_kill_chrome_process()` + `create_browser_context()`로 크롬을 재시작하고
+  `login_mode="auto"`로 한 번 더 시도. `LoginFailedError`(자격증명 오류)는 재시도 없이
+  즉시 전파. 반환된 새 context를 호출부가 이어서 써야 함.
+- `main.py`/`prelogin.py`: `naver_login.login(...)` → `naver_login.login_with_recovery(...)`로
+  교체, 반환 context를 이어서 사용.
+- 검증: `py_compile` 구문 검증, mock 기반 스모크 테스트 4건(분기별 동작 확인, 커밋 대상
+  아님), 오케스트레이터 pytest 스위트 125건 재확인 — 전부 통과.
+
+### 재조사 불필요한 핵심 사실
+- 이 서브프로젝트(`NaverAutoWrite`)는 pytest 인프라가 없어 단위 테스트를 두지 않는다
+  (기존 관례와 동일) — 로직 검증은 스크래치패드의 mock 스모크 테스트로만 했고 저장소에
+  남기지 않았다.
+- 실제 네이버 계정으로 "60초 방치 → 자동 전환 → 그래도 실패 시 크롬 재시작" 전체 흐름의
+  라이브 검증은 못 했다(자격증명 필요 + 60초 이상 대기를 실제로 재현해야 함) — 다음
+  멀티 작업 실행에서 로그인 지연이 재발하는지 사용자 확인 필요.
+
 ## 다음 할 일
+- 위 재로그인 수정 라이브 검증: 같은 계정으로 2건 이상 연속 발행했을 때 두 번째부터
+  "이미 로그인된 크롬 세션입니다" 로그가 찍히고 자동 입력 로그인이 재발하지 않는지 확인.
+  여전히 재로그인되면 `_LOGGED_IN_REDIRECT_TIMEOUT_MS`를 늘리거나, URL 대신 `#id` 입력
+  필드 존재 여부로 판정하는 방식으로 바꿀 것.
 - 사용자가 실제로 다시 발행을 돌려서 좀비 타깃 복구 로직(`_connect_over_cdp_with_retry`)과
   로그인 필드 자동완성 삽입 수정이 실제 환경에서 정상 동작하는지 확인 필요(라이브 검증 대기).
 - `memory-bank/planAndTask.md`에 위 세 수정(계정 전환 경쟁 조건, CDP 좀비 타깃, 로그인
@@ -228,6 +320,7 @@
 - 크롬 CDP 좀비 타깃으로 인한 발행 실패 수정 커밋/푸시 완료(`2b39bcd`).
 
 ## 커밋 상태
-위 "로그인 필드 자동완성 삽입 버그 수정"(`NaverAutoWrite/naver_login.py`)은
-**아직 커밋되지 않음** — 사용자가 커밋/푸시를 요청하면 이 파일이 대상이다. 그 외
+"로그인 필드 자동완성 삽입 버그 수정"은 `590994f`로 커밋됨. 위 "매 발행마다 재로그인
+문제 수정"(`NaverAutoWrite/naver_login.py`, `app.py`, `pipeline.py`)은 **아직 커밋되지
+않음** — 사용자가 커밋/푸시를 요청하면 이 파일들이 대상이다. 그 외
 나머지는 전부 `origin/main`에 반영됨(마지막 확인 커밋 `077d5ba`).

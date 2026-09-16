@@ -68,7 +68,7 @@ def main() -> int:
 
         print(f"진행 상황: 신규 로그인 시작 (login-mode={args.login_mode})")
         try:
-            naver_login.login(context, config, args.login_mode)
+            naver_login.login_with_recovery(playwright, context, config, args.login_mode, args.headless)
         except (naver_login.LoginFailedError, naver_login.AuthChallengeTimeoutError) as exc:
             print(f"에러: {exc}", file=sys.stderr)
             return 1
