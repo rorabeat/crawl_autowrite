@@ -129,26 +129,44 @@ def build_claude_exec_args(model: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# AI 모델 선택 (사용자 요청): codex(GPT-5.5/GPT-5.6 Sol/Runa/Tera) 또는 Claude(Sonnet/Haiku) 중 하나를 골라
+# AI 모델 선택: 2026-10-27 공식 문서 및 codex-cli 0.164.0 모델 캐시 확인.
 # AI 글/이미지 생성에 사용한다. "백엔드:모델명" 형태의 문자열 하나로 인코딩해
 # InputDefaults/TaskItem/PipelineContext에 그대로 저장한다(값 하나로 백엔드+모델을 함께 관리).
 # ---------------------------------------------------------------------------
 AI_MODEL_CHOICES: list[tuple[str, str]] = [
-    ("Codex · GPT-5.5", "codex:gpt-5.5"),
-    ("Codex · GPT-5.6 Sol", "codex:gpt-5.6-sol"),
-    ("Codex · GPT-5.6 Runa", "codex:gpt-5.6-runa"),
-    ("Codex · GPT-5.6 Tera", "codex:gpt-5.6-tera"),
-    ("Codex · GPT-5.6 Luna + GPT Image Low", "codex:gpt-5.6-luna"),
-    ("Claude Sonnet", "claude:sonnet"),
-    ("Claude Haiku", "claude:haiku"),
+    ("Codex · GPT-6.1 Sol + imagegen (GPT Image 2.5 Flare 요청)", "codex:gpt-6.1-sol"),
+    ("Codex · GPT-6.1 Terra + imagegen (GPT Image 2.5 Flare 요청)", "codex:gpt-6.1-terra"),
+    ("Codex · GPT-6 Astra + imagegen (GPT Image 2.5 Flare 요청)", "codex:gpt-6-astra"),
+    ("Codex · GPT-6 Sol + imagegen (GPT Image 2.5 Flare 요청)", "codex:gpt-6-sol"),
+    ("Codex · GPT-6 Luna + imagegen (GPT Image 2.5 Flare · Low 요청)", "codex:gpt-6-luna"),
+    ("Claude Sonnet 최신 (5.5) + WebSearch/WebFetch (이미지 검색)", "claude:sonnet"),
+    ("Claude Haiku 최신 (5.5) + WebSearch/WebFetch (이미지 검색)", "claude:haiku"),
 ]
 
-# codex --model에 이 이름이 오면 $imagegen 지시에 "gpt-image-1 low quality" 힌트를
-# 추가한다(사용자 요청: "GPT-5.6 Luna + GPT Image Low 모델로 이미지 생성"). codex CLI에는
-# 이미지 모델/품질을 고르는 별도 플래그가 없어(실측: `codex exec --help`), 프롬프트로
-# $imagegen에 전달할 품질 옵션을 명시하는 방식으로만 제어 가능하다.
-CODEX_LOW_QUALITY_IMAGE_MODELS = ("gpt-5.6-luna",)
+# imagegen 내장 도구의 모델/품질은 CLI에서 고정할 수 없어 프롬프트 요청으로만 전달.
+IMAGE_GENERATION_MODEL = "gpt-image-2.5-flare"
+CODEX_LOW_QUALITY_IMAGE_MODELS = ("gpt-6-luna",)
+AI_MODEL_HELP = (
+    "Codex: imagegen으로 AI 이미지 생성. GPT Image 2.5 Flare 및 Low는 프롬프트 요청이며 "
+    "실제 모델·품질은 설치된 도구의 지원 범위에 따릅니다. "
+    "Claude: sonnet/haiku 최신 별칭 사용(공식 현재 5.5, 로컬 설정에 따라 달라질 수 있음). "
+    "이미지는 WebSearch/WebFetch로 검색·다운로드하며 AI 이미지 생성은 하지 않습니다."
+)
 AI_MODEL_DEFAULT = AI_MODEL_CHOICES[0][1]
+
+_LEGACY_AI_MODELS = {
+    "codex:gpt-5.5": "codex:gpt-6.1-sol",
+    "codex:gpt-5.6-sol": "codex:gpt-6.1-sol",
+    "codex:gpt-5.6-runa": "codex:gpt-6.1-sol",
+    "codex:gpt-5.6-tera": "codex:gpt-6.1-terra",
+    "codex:gpt-5.6-terra": "codex:gpt-6.1-terra",
+    "codex:gpt-5.6-luna": "codex:gpt-6-luna",
+}
+
+
+def resolve_ai_model(value: str) -> str:
+    """기존 저장값은 최신 선택값으로 해석하되 사용자 파일을 직접 덮어쓰지 않는다."""
+    return _LEGACY_AI_MODELS.get(value, value)
 
 
 def ai_model_label(value: str) -> str:
@@ -157,6 +175,7 @@ def ai_model_label(value: str) -> str:
     멀티 작업 탭에서 진행 중/대기 중 작업 목록에 모델명을 보여줄 때 쓴다(사용자 요청).
     목록에 없는 값(예: 구버전에 저장된 값)이면 원본 문자열을 그대로 보여준다.
     """
+    value = resolve_ai_model(value)
     for label, choice_value in AI_MODEL_CHOICES:
         if choice_value == value:
             return label
@@ -169,7 +188,7 @@ def parse_ai_model(value: str) -> tuple[str, str]:
     저장된 값이 비어있거나 형식이 이상하면(예: 구버전 값, 손상된 JSON) AI_MODEL_DEFAULT로
     폴백한다 — tasks.json/input_defaults.json의 기존 손상 방어 정책과 동일하다.
     """
-    candidate = value if value and ":" in value else AI_MODEL_DEFAULT
+    candidate = resolve_ai_model(value) if value and ":" in value else AI_MODEL_DEFAULT
     backend, _, model = candidate.partition(":")
     return backend, model
 

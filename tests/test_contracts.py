@@ -138,7 +138,15 @@ def test_claude_exec_args_do_not_allow_bash():
 
 def test_parse_ai_model_splits_backend_and_model():
     assert config.parse_ai_model("claude:sonnet") == ("claude", "sonnet")
-    assert config.parse_ai_model("codex:gpt-5.6-sol") == ("codex", "gpt-5.6-sol")
+    assert config.parse_ai_model("codex:gpt-6.1-sol") == ("codex", "gpt-6.1-sol")
+
+
+def test_saved_legacy_models_resolve_to_current_choices():
+    assert config.parse_ai_model("codex:gpt-5.5") == ("codex", "gpt-6.1-sol")
+    assert config.parse_ai_model("codex:gpt-5.6-tera") == ("codex", "gpt-6.1-terra")
+    assert config.parse_ai_model("codex:gpt-5.6-luna") == ("codex", "gpt-6-luna")
+    assert "imagegen" in config.ai_model_label("codex:gpt-5.6-luna")
+    assert "Low" in config.ai_model_label("codex:gpt-5.6-luna")
 
 
 def test_parse_ai_model_falls_back_to_default_on_malformed_value():

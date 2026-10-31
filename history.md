@@ -2797,3 +2797,125 @@ api 호출 키 저장은 어디에 되어 있어
 
 커밋하고 푸시해줘
 
+
+**AI 처리 요약:** 커밋·푸시 완료했습니다 (`2b39bcd..590994f`, 2개 커밋).  1. **`8b03d7d`** — 발행 계정을 `accounts.json`으로만 제한(`.env` 폴백 제거). 이건 제가 작업 중이 아닐 때 (IDE 등에서) 별도로 만들어진 변경이었는데, 테스트 125건 전원 통과를 확
+
+## 2026-09-10 21:24:49 - 사용자 프롬프트
+
+[Image #1] 글 쓸때마다 로그인 하는거 같은데 왜그러지 한번만 로그인하고 이전과 아이디가 다른경우에만 다시 로그인하도록 변경해줘, 그리고 글시작하기전에 로그인하는거는 빼고 글을 쓰기 시작할때 로그인 하도록 변경해줘 fable 로 진행
+
+
+**AI 처리 요약:** 수정을 마쳤습니다. 테스트 125건 전원 통과했고, 커밋은 하지 않았습니다.  **원인**  - 로그인 여부 판정(`NaverAutoWrite/naver_login.py`의 `create_browser_context`)이 로그인 페이지로 이동한 직후의 URL만 보고 결정됐습니다. 이미 로그인�
+
+## 2026-09-13 19:26:38 - 사용자 프롬프트
+
+ (title='아이러브제이원피스, 아이와 엄마 취향을 함께 잡는 고르는 법')
+19:09:33 I 크롬 프로필 재사용(로그인 완료 이력 있음): C:\gitRepo\crawl_autowrite\NaverAutoWrite\.naver_session\9ad7d995e1904e2abc33bf73042e5b7f
+19:09:33 I 기존 크롬 프로세스에 연결합니다: http://127.0.0.1:9333
+19:09:33 I 진행 상황: 신규 로그인 시작 (login-mode=auto)
+19:09:33 I 진행 상황: 로그인 성공
+19:09:33 I Traceback (most recent call last):
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 101, in <module>
+19:09:33 I     sys.exit(main())
+19:09:33 I              ~~~~^^
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\NaverAutoWrite\main.py", line 77, in main    
+19:09:33 I     page = context.new_page()
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\sync_api\_generated.py", line 14357, in new_page
+19:09:33 I     return mapping.from_impl(self._sync(self._impl_obj.new_page()))
+19:09:33 I                              ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+19:09:33 I     return task.result()
+19:09:33 I            ~~~~~~~~~~~^^
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_browser_context.py", line 345, in new_page
+19:09:33 I     return from_channel(await self._channel.send("newPage", None))
+19:09:33 I                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+19:09:33 I     return await self._connection.wrap_api_call(
+19:09:33 I            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19:09:33 I     ...<3 lines>...
+19:09:33 I     )
+19:09:33 I     ^
+19:09:33 I   File "C:\gitRepo\crawl_autowrite\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+19:09:33 I     raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None    
+19:09:33 I playwright._impl._errors.Error: BrowserContext.new_page: Protocol error (Target.createTarget): Failed to open a new tab
+19:09:33 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-09-13_아이러브제이원피스, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'success'}, 'image_gen': {'status': 'success'}, 'image_search': {'status': 'skipped'}, 'publish': {'status': 'failed'}}
+QThread: Destroyed while thread '' is still running
+(.venv) PS C:\gitRepo\crawl_autowrite> & c:/gitRepo/crawl_autowrite/.venv/Scripts/python.exe c:/gitRepo/crawl_autowrite/app.py
+19:26:14 I ImageDropList 초기화됨
+19:26:14 I agents_editor.load_agents_md: C:\gitRepo\crawl_autowrite\agents\AGENTS.md (2015자)
+19:26:14 I MainWindow 초기화 완료: 5개 탭 생성
+
+
+## 2026-09-17 07:23:00 - 사용자 프롬프트
+
+멀티작업중 
+[작업 #42] AI 생성: running
+[작업 #42] AI 생성: success
+[작업 #42] 이미지 생성: success
+[작업 #42] 이미지 검색: running
+[작업 #42] 이미지 검색: skipped
+[작업 #42] 발행: running
+[작업 #42] 발행: failed
+[작업 #42] 실패
+[작업 #43] 크롤링: running
+[작업 #43] 크롤링: success
+[작업 #43] AI 생성: running
+[작업 #43] AI 생성: success
+[작업 #43] 이미지 생성: success
+[작업 #43] 이미지 검색: running
+[작업 #43] 이미지 검색: skipped
+[작업 #43] 발행: running
+[작업 #43] 발행: failed
+[작업 #43] 실패
+[작업 #44] 크롤링: running
+[작업 #44] 크롤링: success
+[작업 #44] AI 생성: running
+[작업 #44] AI 생성: success
+[작업 #44] 이미지 생성: success
+[작업 #44] 이미지 검색: running
+[작업 #44] 이미지 검색: skipped
+[작업 #44] 발행: running 일정 시간동안  로그인이 안되면 자동 로그인으로 전환하여 로그인을 수행하도록 해줘 만일 로그인이 그래도 안돼면 크롬을 재실행해서 진행해줘
+현재는 로그인이 안돼서 글 등록이 fail 처리됐어 테스트 까지 다 돼면 커밋 푸시해줘
+
+
+**AI 처리 요약:** ## 요약  **수정 내용** (`NaverAutoWrite/naver_login.py`, `main.py`, `prelogin.py`):  - 수동 로그인 모드는 원래 사람이 로그인을 끝낼 때까지 **무제한 대기**했습니다(`CHALLENGE_TIMEOUT_MS=0`). 멀티 작업 중 사람이 옆에 없으면 `PUBLISH_TIMEOUT_SEC`(12
+
+## 2026-09-19 17:59:35 - 사용자 프롬프트
+
+c:\gitRepo\crawl_autowrite\agents\AGENTS.md 주제의 공식 웹사이트나 인스타그램을 검색해서 실제 사실정보를 표시하도록 agent 파일을 수정해줘
+
+
+**AI 처리 요약:** `agents/AGENTS.md`의 "작성 규칙" 절에 규칙을 추가했습니다. 글 작성 전에 다루는 주제(여행지·장소·업체 등)의 공식 웹사이트나 공식 인스타그램을 검색해 정확한 명칭·주소·운영시간·요금·예약 방법·연락처 등 실제 사실정보�
+
+## 2026-09-19 18:00:55 - 사용자 프롬프트
+
+사진을 작성할때는 블로그나 공식 홈페이지의 사진을 참고해서 최대한 실제 정보를 표시하도록 agents 를 수정해줘
+
+
+**AI 처리 요약:** "이미지 내용을 직접 분석해서..." 항목 아래에 규칙을 추가했습니다. 이미지 alt 텍스트와 주변 본문을 쓸 때 사진만 보고 단정하지 말고, 공식 홈페이지나 다른 블로그 후기의 동일 장소/메뉴/시설 사진을 참고해서 명칭·위치·�
+
+## 2026-09-19 20:34:12 - 사용자 프롬프트
+
+
+
+<pasted_content id="fa70">
+
+20:07:10 I 진행 상황: 제목/본문 입력 완료
+20:07:10 I 진행 상황: 임시저장 완료 (바로 발행하지 않음 — 네이버 블로그에서 직접 확인 후 발행하세요)
+20:07:10 I run_publish: rc=0, warning=None
+20:07:10 I run_pipeline 완료: work_dir=C:\gitRepo\crawl_autowrite\PostResult\2026-09-19_프리마호텔사우나, steps={'crawl': {'status': 'success'}, 'generate': {'status': 'success'}, 'image_gen': {'status': 'failed'}, 'image_search': {'status': 'skipped'}, 'publish': {'status': 'success'}}
+QThread: Destroyed while thread '' is still running
+(.venv) PS C:\gitRepo\crawl_autowrite> 
+</pasted_content id="fa70">
+
+ 프로그램 죽은 이유 확인
+
+
+**AI 처리 요약:** 원인 파악 및 수정 완료했습니다. 요약:  **원인**: `JobQueueManager._on_worker_finished`(전체 실행 파이프라인이 끝났을 때 호출)에서 `finished_signal`을 받자마자 `self._worker = None`으로 파이썬 참조를 끊었는데, 이 신호는 `PipelineWorker.run()`�
+
+## 2026-09-19 20:36:06 - 사용자 프롬프트
+
+창 닫을 때도 마저 고쳐줘
+
+
+**AI 처리 요약:** **요약**: 창을 닫을 때(`closeEvent`)도 실행 중인 백그라운드 스레드(전체 실행 파이프라인, 단독 단계 실행, 로그인)가 있으면 확인 없이 그냥 닫혀서, 이전에 고친 것과 같은 원인("QThread: Destroyed while thread is still running")으로 앱이 �

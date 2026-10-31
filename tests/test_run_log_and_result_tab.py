@@ -6,6 +6,32 @@ import config
 from app import InputTab, ResultTab, RunLogTab
 
 
+def test_summary_progress_tracks_steps_and_failure(qtbot):
+    from app import LogPanel
+    panel = LogPanel()
+    qtbot.addWidget(panel)
+    panel.start_progress("테스트 작업", RunLogTab.STEP_NAMES)
+    panel.update_progress("crawl", "skipped")
+    panel.update_progress("generate", "running")
+    assert panel.progress_bar.value() == 20
+    assert "AI 글·이미지 작성" in panel.summary_label.text()
+    panel._update_elapsed()
+    assert "초 경과" in panel.summary_label.text()
+    panel.update_progress("generate", "failed")
+    panel.finish_progress({"steps": {"generate": {"status": "failed"}}})
+    assert panel.progress_bar.value() == 20
+    assert "실패" in panel.summary_label.text()
+    assert not panel._progress_timer.isActive()
+    panel.start_progress("다음 작업", RunLogTab.STEP_NAMES)
+    assert panel.progress_bar.value() == 0
+    for name in RunLogTab.STEP_NAMES:
+        panel.update_progress(name, "success")
+    assert panel.progress_bar.value() < 100
+    panel.finish_progress({"steps": {"publish": {"status": "success"}}})
+    assert panel.progress_bar.value() == 100
+    assert "완료" in panel.summary_label.text()
+
+
 def test_run_log_tab_runs_worker_and_updates_ui(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "POST_RESULT_ROOT", tmp_path)
 

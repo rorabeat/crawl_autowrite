@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -58,6 +59,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -77,7 +79,7 @@ logger = logging.getLogger(__name__)
 # 잘라서 보여준다(전체 내용은 output/, blog/ 폴더의 실제 파일에서 확인).
 LOG_LINE_MAX_CHARS = 300
 
-TAB_TITLES = ["입력", "AGENTS.md 편집", "실행·로그", "멀티 작업", "결과"]
+TAB_TITLES = ["입력", "AGENTS.md 편집", "실행·로그", "멀티 작업", "결과", "스타일 분석 멀티작업", "초안 검토"]
 
 
 def build_app_icon(size: int = 256) -> QIcon:
@@ -335,10 +337,78 @@ class LogPanel(QWidget):
         header_row.addWidget(self.clear_button)
 
         layout = QVBoxLayout(self)
+        self.summary_label = QLabel("대기 중 — 실행할 작업을 추가해 주세요.")
+        self.summary_label.setWordWrap(True)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p% (단계 기준)")
+        self.summary_log = QTextEdit()
+        self.summary_log.setReadOnly(True)
+        self.summary_log.setMaximumHeight(130)
+        self.summary_log.document().setMaximumBlockCount(100)
+        self._progress_steps = {}
+        self._progress_names = ()
+        self._progress_title = ""
+        self._active_step = None
+        self._active_since = 0.0
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(1000)
+        self._progress_timer.timeout.connect(self._update_elapsed)
+        layout.addWidget(QLabel("간단 로그 · 현재 진행상황"))
+        layout.addWidget(self.summary_label)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.summary_log)
         layout.addLayout(header_row)
         layout.addWidget(self.log_view)
 
         self.log_signal.connect(self.append_line)
+
+    def start_progress(self, title: str, names: tuple[str, ...]) -> None:
+        self._progress_title = title
+        self._progress_names = names
+        self._progress_steps = {}
+        self._active_step = None
+        self._progress_timer.stop()
+        self.progress_bar.setValue(0)
+        self.summary_label.setText(f"{title} · 준비 중")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {html.escape(title)} · 시작")
+
+    def update_progress(self, name: str, status: str) -> None:
+        if name not in self._progress_names:
+            return
+        labels = {"crawl": "자료 수집·분석", "generate": "AI 글·이미지 작성",
+                  "image_gen": "이미지 생성 결과 확인", "image_search": "이미지 검색", "publish": "블로그 발행"}
+        states = {"running": "진행 중", "success": "완료", "skipped": "건너뜀",
+                  "failed": "실패", "canceled": "취소됨", "review": "초안 검토 대기"}
+        self._progress_steps[name] = status
+        # 실제 완료/생략된 단계만 계산한다. AI 응답 대기 중에는 값을 추측하지 않는다.
+        done = sum(self._progress_steps.get(n) in {"success", "skipped"} for n in self._progress_names)
+        self.progress_bar.setValue(min(99, int(done * 100 / len(self._progress_names))))
+        description = f"{labels.get(name, name)} · {states.get(status, status)}"
+        self._active_step = description if status == "running" else None
+        self._active_since = time.monotonic()
+        self.summary_label.setText(f"{self._progress_title} · {description}")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {html.escape(description)}")
+        if self._active_step:
+            self._progress_timer.start()
+        else:
+            self._progress_timer.stop()
+
+    def _update_elapsed(self) -> None:
+        if self._active_step:
+            elapsed = int(time.monotonic() - self._active_since)
+            self.summary_label.setText(f"{self._progress_title} · {self._active_step} ({elapsed}초 경과)")
+
+    def finish_progress(self, result: dict) -> None:
+        self._progress_timer.stop()
+        self._active_step = None
+        statuses = [step.get("status") for step in result.get("steps", {}).values()]
+        state = "취소됨" if "canceled" in statuses else ("실패" if "failed" in statuses or result.get("error") else "완료")
+        if state == "완료":
+            self.progress_bar.setValue(100)
+        self.summary_label.setText(f"{self._progress_title} · {state}")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {state}")
 
     def append_line(self, line: str) -> None:
         # subprocess_runner.run()이 codex exec에게 stdin으로 넘기는 프롬프트를 "[CODEX 입력]"
@@ -592,7 +662,8 @@ class InputTab(QWidget):
         self.ai_model_combo = QComboBox()
         for label, value in config.AI_MODEL_CHOICES:
             self.ai_model_combo.addItem(label, value)
-        idx = self.ai_model_combo.findData(input_defaults.ai_model)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(input_defaults.ai_model))
         self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.ai_model_combo.currentIndexChanged.connect(self._save_input_defaults)
 
@@ -737,6 +808,11 @@ class InputTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(keyword_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(input_defaults.review_draft)
+        self.review_draft_checkbox.toggled.connect(self._save_input_defaults)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 네이버 임시저장을 진행합니다.")
+        layout.addWidget(self.review_draft_checkbox)
         layout.addWidget(self.manual_login_checkbox)
         layout.addLayout(ai_model_row)
         layout.addLayout(account_row)
@@ -865,6 +941,10 @@ class InputTab(QWidget):
         self._prelogin_worker = worker
         worker.start()
 
+    def prelogin_worker(self) -> "PreloginWorker | None":
+        """현재 실행 중인 로그인 워커(창 닫기 시 확인/wait()용)."""
+        return self._prelogin_worker
+
     def _on_login_finished(self, success: bool) -> None:
         self.login_button.setEnabled(True)
         account_label = pipeline.account_label(self.login_account_combo.currentData())
@@ -878,6 +958,7 @@ class InputTab(QWidget):
         즉시 input_defaults.json에 저장해 다음 앱 실행에도 같은 값으로 시작하게 한다."""
         pipeline.save_input_defaults(
             pipeline.InputDefaults(
+                review_draft=self.review_draft_checkbox.isChecked(),
                 generate_images=self.generate_images_checkbox.isChecked(),
                 image_gen_count=self.image_gen_count_spin.value(),
                 search_images=self.search_images_checkbox.isChecked(),
@@ -908,6 +989,7 @@ class InputTab(QWidget):
             search_images_download=self.search_download_checkbox.isChecked(),
             search_images_timing="after" if self.search_timing_after_radio.isChecked() else "before",
             agents_md_path=self.agents_md_path,
+            review_draft=self.review_draft_checkbox.isChecked(),
             reuse_work_dir=self.selected_reuse_dir,
             login_mode="manual" if self.manual_login_checkbox.isChecked() else "auto",
             ai_model=self.ai_model_combo.currentData(),
@@ -926,7 +1008,7 @@ class TaskEditDialog(QDialog):
 
     def __init__(self, task: TaskItem | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("태스크 편집" if task is not None else "새 태스크")
+        self.setWindowTitle("일반 태스크 편집" if task is not None else "새 일반 태스크")
         self._task_id = task.task_id if task is not None else pipeline.new_task_id()
 
         self.label_edit = QLineEdit(task.label if task is not None else "")
@@ -968,7 +1050,8 @@ class TaskEditDialog(QDialog):
         self.ai_model_combo = QComboBox()
         for label, value in config.AI_MODEL_CHOICES:
             self.ai_model_combo.addItem(label, value)
-        idx = self.ai_model_combo.findData(task.ai_model if task is not None else image_defaults.ai_model)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(task.ai_model if task is not None else image_defaults.ai_model))
         self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.ai_model_combo.currentIndexChanged.connect(self._save_image_defaults)
 
@@ -1104,6 +1187,9 @@ class TaskEditDialog(QDialog):
         button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        mode_hint = QLabel("이미지 수와 작성 지침을 직접 설정하는 일반 작업입니다.\n첫 글 분석으로 자동 설정하려면 ‘스타일 분석 멀티작업’ 탭을 이용하세요.")
+        mode_hint.setWordWrap(True)
+        layout.addWidget(mode_hint)
         layout.addWidget(QLabel("태스크 이름"))
         layout.addWidget(self.label_edit)
         layout.addWidget(QLabel("키워드"))
@@ -1121,6 +1207,10 @@ class TaskEditDialog(QDialog):
         layout.addLayout(search_images_row)
         layout.addWidget(self.search_status_label)
         layout.addLayout(agents_md_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(task.review_draft if task else False)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 네이버 임시저장을 진행합니다.")
+        layout.addWidget(self.review_draft_checkbox)
         layout.addWidget(self.manual_login_checkbox)
         layout.addWidget(self.comment_edit)
         layout.addLayout(image_header_row)
@@ -1246,6 +1336,7 @@ class TaskEditDialog(QDialog):
 
     def _shared_task_kwargs(self) -> dict:
         return {
+            "review_draft": self.review_draft_checkbox.isChecked(),
             "comment": self.comment_edit.toPlainText(),
             "image_paths": list(self.image_drop_list.image_paths),
             "use_crawling": self.use_crawling_checkbox.isChecked(),
@@ -1277,6 +1368,115 @@ class TaskEditDialog(QDialog):
         ]
 
 
+
+class StyleTaskEditDialog(TaskEditDialog):
+    """스타일 분석 작업은 분석 결과로 이미지 수와 지침을 결정한다."""
+
+    def __init__(self, task: TaskItem | None = None, parent: QWidget | None = None) -> None:
+        QDialog.__init__(self, parent)
+        self.setWindowTitle("스타일 분석 작업 편집" if task else "새 스타일 분석 작업")
+        self._task_id = task.task_id if task else pipeline.new_task_id()
+        self.label_edit = QLineEdit(task.label if task else "")
+        self.keyword_edit = QLineEdit(task.keyword if task else "")
+        self.bulk_mode_checkbox = QCheckBox("여러 키워드 일괄 생성(줄바꿈으로 구분)")
+        self.bulk_mode_checkbox.setVisible(task is None)
+        self.bulk_keyword_edit = QTextEdit()
+        self.bulk_keyword_edit.setPlaceholderText("한 줄에 키워드 하나씩 입력")
+        self.bulk_keyword_edit.setVisible(False)
+        self.bulk_mode_checkbox.toggled.connect(self._on_style_bulk_toggled)
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(task.crawl_count if task else 3)
+        self.crawl_count_spin.setSuffix("건")
+        self.ai_model_combo = QComboBox()
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        for label, value in config.AI_MODEL_CHOICES:
+            if value.startswith("codex:"):
+                self.ai_model_combo.addItem(label, value)
+        if task:
+            idx = self.ai_model_combo.findData(config.resolve_ai_model(task.ai_model))
+            if idx >= 0:
+                self.ai_model_combo.setCurrentIndex(idx)
+        self.account_combo = QComboBox()
+        _populate_account_combo(self.account_combo, task.account_id if task else None, enabled=True)
+        self.account_manage_button = QPushButton("계정 관리…")
+        self.account_manage_button.clicked.connect(lambda: _open_account_manager(self, self.account_combo))
+        self.manual_login_checkbox = QCheckBox("네이버 로그인 수동으로 진행(자동 입력 안 함)")
+        self.manual_login_checkbox.setChecked(task.login_mode == "manual" if task else True)
+        self.comment_edit = QTextEdit(task.comment if task else "")
+        self.comment_edit.setPlaceholderText("추가 요청(선택)")
+        self._keyword_manually_edited = task is not None and task.keyword != task.label
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        self.keyword_edit.textEdited.connect(self._on_keyword_edited)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("저장" if task else "작업 만들기")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        for label, widget in (("태스크 이름", self.label_edit), ("키워드", self.keyword_edit)):
+            layout.addWidget(QLabel(label))
+            layout.addWidget(widget)
+        layout.addWidget(self.bulk_mode_checkbox)
+        layout.addWidget(self.bulk_keyword_edit)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("검색 글 수"))
+        row.addWidget(self.crawl_count_spin)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(QLabel("AI 실행기/모델 (Codex)"))
+        layout.addWidget(self.ai_model_combo)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("발행 계정"))
+        row.addWidget(self.account_combo)
+        row.addWidget(self.account_manage_button)
+        layout.addLayout(row)
+        self.automatic_settings_label = QLabel(
+            "자동 설정\n"
+            "• 크롤링은 항상 사용하며, 첫 번째 검색 글의 말투·분량을 분석합니다.\n"
+            "• AI 이미지 수는 첫 글의 이미지 수에 맞춰 자동 결정합니다 (최대 15장).\n"
+            "• AGENTS.md는 분석 결과로 작업마다 자동 생성합니다.\n"
+            "• 원문을 복사하지 않고, 방문 전 알아보는 관점으로 작성합니다."
+        )
+        self.automatic_settings_label.setWordWrap(True)
+        layout.addWidget(self.automatic_settings_label)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(task.review_draft if task else False)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 네이버 임시저장을 진행합니다.")
+        layout.addWidget(self.review_draft_checkbox)
+        layout.addWidget(self.manual_login_checkbox)
+        layout.addWidget(self.comment_edit)
+        layout.addWidget(buttons)
+        self.resize(480, 480)
+
+    def _on_style_bulk_toggled(self, checked: bool) -> None:
+        self.keyword_edit.setVisible(not checked)
+        self.bulk_keyword_edit.setVisible(checked)
+        self.label_edit.setDisabled(checked)
+
+    def _shared_task_kwargs(self) -> dict:
+        return {
+            "review_draft": self.review_draft_checkbox.isChecked(),
+            "comment": self.comment_edit.toPlainText(),
+            "crawl_count": self.crawl_count_spin.value(),
+            "login_mode": "manual" if self.manual_login_checkbox.isChecked() else "auto",
+            "ai_model": self.ai_model_combo.currentData(),
+            "account_id": self.account_combo.currentData(),
+        }
+
+    def get_task_item(self):
+        from style_multitask.models import StyleTaskItem
+        keyword = self.keyword_edit.text().strip()
+        return StyleTaskItem(task_id=self._task_id, label=self.label_edit.text().strip() or keyword,
+                             keyword=keyword, **self._shared_task_kwargs())
+
+    def get_task_items(self):
+        from style_multitask.models import StyleTaskItem
+        if not self.bulk_mode_checkbox.isChecked():
+            return [self.get_task_item()]
+        return [StyleTaskItem(task_id=pipeline.new_task_id(), label=keyword, keyword=keyword,
+                              **self._shared_task_kwargs()) for keyword in self._bulk_keywords()]
+
 class BulkQueueEditDialog(QDialog):
     """대기열에 있는 여러 작업의 공통 설정을 한 번에 바꾸는 다이얼로그(사용자 요청).
 
@@ -1302,7 +1502,8 @@ class BulkQueueEditDialog(QDialog):
         self.ai_model_combo = QComboBox()
         for label, value in config.AI_MODEL_CHOICES:
             self.ai_model_combo.addItem(label, value)
-        idx = self.ai_model_combo.findData(seed.ai_model)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(seed.ai_model))
         self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         # 일괄 설정 변경 다이얼로그는 선택한 여러 대기 작업의 발행 계정을 한 번에 바꿔
@@ -1401,6 +1602,10 @@ class BulkQueueEditDialog(QDialog):
         layout.addLayout(generate_images_row)
         layout.addLayout(search_images_row)
         layout.addLayout(agents_md_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(seed.review_draft)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 네이버 임시저장을 진행합니다.")
+        layout.addWidget(self.review_draft_checkbox)
         layout.addWidget(self.manual_login_checkbox)
         layout.addWidget(button_box)
         self.resize(440, 320)
@@ -1430,6 +1635,7 @@ class BulkQueueEditDialog(QDialog):
         context.crawl_count = self.crawl_count_spin.value()
         context.ai_model = self.ai_model_combo.currentData()
         context.account_id = self.account_combo.currentData()
+        context.review_draft = self.review_draft_checkbox.isChecked()
         context.generate_images = self.generate_images_checkbox.isChecked()
         context.image_gen_count = self.image_gen_count_spin.value()
         context.search_images = self.search_images_checkbox.isChecked()
@@ -1448,6 +1654,8 @@ class AgentsEditorTab(QWidget):
     사용자가 입력한 텍스트를 그대로 저장한다. 입력 탭/태스크 편집의 agents_md_combo와
     같은 방식으로 agents/ 폴더의 파일명을 나열해 고르게 한다(사용자 요청).
     """
+
+    file_created = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1470,6 +1678,9 @@ class AgentsEditorTab(QWidget):
         combo_row = QHBoxLayout()
         combo_row.addWidget(QLabel("AGENTS.md 파일"))
         combo_row.addWidget(self.agents_file_combo, 1)
+        self.new_button = QPushButton("새로 만들기")
+        self.new_button.clicked.connect(self._on_new)
+        combo_row.addWidget(self.new_button)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.save_button)
@@ -1521,8 +1732,130 @@ class AgentsEditorTab(QWidget):
         agents_editor.save_agents_md(content, self._current_path)
         self._original_content = content
 
+    def _on_new(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self, "AGENTS.md 새로 만들기", "파일 이름 (.md는 자동으로 붙습니다):"
+        )
+        if not accepted:
+            return
+        if self.text_edit.toPlainText() != self._original_content:
+            reply = QMessageBox.question(
+                self, "AGENTS.md 새로 만들기",
+                "저장하지 않은 변경사항이 있습니다. 무시하고 새 파일로 전환할까요?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            path = agents_editor.create_agents_md(name)
+        except FileExistsError:
+            QMessageBox.warning(self, "생성 실패", "같은 이름의 파일이 이미 있습니다. 다른 이름을 입력해 주세요.")
+            return
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "생성 실패", str(exc))
+            return
+        self._refresh_agents_file_choices()
+        self._select_combo_path(path)
+        self._current_path = path
+        self._original_content = ""
+        self.text_edit.clear()
+        self.text_edit.setFocus()
+        self.file_created.emit()
+
     def _on_cancel(self) -> None:
         self.text_edit.setPlainText(self._original_content)
+
+
+class DraftReviewTab(QWidget):
+    """AI가 저장한 Markdown을 그대로 열고 검토 후 전송을 재개한다."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker = None
+        self.path = None
+        self.status_label = QLabel("검토할 초안이 없습니다.")
+        self.path_label = QLabel("")
+        self.path_label.setWordWrap(True)
+        self.text_edit = QTextEdit()
+        self.preview = QTextBrowser()
+        self.preview.setOpenExternalLinks(False)
+        self.preview.setOpenLinks(False)
+        self.text_edit.textChanged.connect(self._refresh_preview)
+        self.save_button = QPushButton("MD 저장")
+        self.send_button = QPushButton("저장 후 네이버 임시저장")
+        self.cancel_button = QPushButton("이 작업 전송 취소")
+        self.save_button.clicked.connect(self._save)
+        self.send_button.clicked.connect(self._send)
+        self.cancel_button.clicked.connect(self._cancel)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        for title, widget in (("Markdown 편집", self.text_edit), ("미리보기", self.preview)):
+            panel = QWidget()
+            column = QVBoxLayout(panel)
+            column.addWidget(QLabel(title))
+            column.addWidget(widget)
+            splitter.addWidget(panel)
+        row = QHBoxLayout()
+        for button in (self.cancel_button, self.save_button, self.send_button):
+            row.addWidget(button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.path_label)
+        layout.addWidget(splitter)
+        layout.addWidget(QLabel("미리보기는 제목·본문·이미지 확인용이며 네이버 편집기와 차이가 있을 수 있습니다."))
+        layout.addLayout(row)
+        self._set_active(False)
+
+    def _set_active(self, active):
+        self.text_edit.setReadOnly(not active)
+        for button in (self.save_button, self.send_button, self.cancel_button):
+            button.setEnabled(active)
+
+    def open_draft(self, worker, path):
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "초안 열기 실패", str(exc))
+            worker.resolve_review(False)
+            return
+        self.worker, self.path = worker, Path(path)
+        self.preview.document().setBaseUrl(QUrl.fromLocalFile(str(self.path.parent.resolve()) + "/"))
+        self.text_edit.setPlainText(content)
+        self.path_label.setText(str(self.path))
+        self.status_label.setText("검토 대기 · AI가 작성한 원문입니다. 확인 후 네이버로 보내세요.")
+        self._set_active(True)
+
+    def _refresh_preview(self):
+        self.preview.setMarkdown(self.text_edit.toPlainText())
+        if self.worker:
+            self.status_label.setText("검토 대기 · 수정한 내용은 저장 후 전송됩니다.")
+
+    def _save(self):
+        if not self.path or not self.worker:
+            return False
+        try:
+            self.path.write_text(self.text_edit.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "MD 저장 실패", str(exc))
+            return False
+        self.status_label.setText("MD 저장 완료 · 네이버 전송 전")
+        return True
+
+    def _send(self):
+        if self.worker and not self.worker.cancel_event.is_set() and self._save():
+            worker = self.worker
+            self.worker = None
+            self._set_active(False)
+            self.status_label.setText("검토 완료 · 네이버 임시저장을 진행합니다.")
+            worker.resolve_review(True)
+
+    def _cancel(self):
+        if self.worker:
+            self.worker.resolve_review(False)
+        self.end_review("전송 취소됨 · 기존 MD 파일은 유지됩니다.")
+
+    def end_review(self, message="작업이 종료되었습니다."):
+        self.worker = None
+        self._set_active(False)
+        self.status_label.setText(message)
 
 
 class TaskManager(QObject):
@@ -1584,6 +1917,7 @@ class PipelineWorker(QThread):
 
     step_signal = Signal(str, str)
     finished_signal = Signal(dict)
+    review_requested = Signal(object)
 
     def __init__(self, context: PipelineContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1592,6 +1926,21 @@ class PipelineWorker(QThread):
         # pipeline.run_pipeline이 다음 폴링 시점(늦어도 0.5초 이내)에 현재 서브프로세스를
         # 강제 종료하고 남은 단계를 모두 "canceled"로 표시한다.
         self.cancel_event = threading.Event()
+        self.review_event = threading.Event()
+        self.review_approved = False
+
+    def request_review(self, path: Path) -> bool:
+        self.review_approved = False
+        self.review_event.clear()
+        self.review_requested.emit(path)
+        while not self.review_event.wait(0.2):
+            if self.cancel_event.is_set():
+                return False
+        return self.review_approved and not self.cancel_event.is_set()
+
+    def resolve_review(self, approved: bool) -> None:
+        self.review_approved = approved
+        self.review_event.set()
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -1604,11 +1953,29 @@ class PipelineWorker(QThread):
         # 로그인해 두고 싶으면 입력 탭의 "로그인" 버튼(PreloginWorker)을 쓰면 된다.
         # 발행 단계는 같은 계정이면 떠 있는 크롬 세션을 그대로 재사용하고, 직전 발행 계정과
         # 다를 때만 크롬을 재기동해 다시 로그인한다(pipeline.run_publish 참조).
-        result = pipeline.run_pipeline(
-            self.context,
-            on_step=lambda name, status: self.step_signal.emit(name, status),
-            cancel_event=self.cancel_event,
-        )
+        if self.context.workflow_kind == "style":
+            try:
+                from style_multitask.runner import run_style_pipeline
+                result = run_style_pipeline(
+                    self.context,
+                    on_step=lambda name, status: self.step_signal.emit(name, status),
+                    cancel_event=self.cancel_event,
+                    **({"on_review": self.request_review} if self.context.review_draft else {}),
+                )
+            except Exception as exc:
+                logging.exception("스타일 작업 실행 실패")
+                result = {"keyword": self.context.keyword, "steps": {
+                    "generate": {"status": "failed", "error": str(exc)},
+                    "publish": {"status": "skipped"},
+                }}
+                self.step_signal.emit("generate", "failed")
+        else:
+            result = pipeline.run_pipeline(
+                self.context,
+                on_step=lambda name, status: self.step_signal.emit(name, status),
+                cancel_event=self.cancel_event,
+                **({"on_review": self.request_review} if self.context.review_draft else {}),
+            )
         self.finished_signal.emit(result)
 
 
@@ -1657,6 +2024,8 @@ def _job_to_task_item(job: QueuedJob) -> TaskItem:
         task_id=pipeline.new_task_id(),
         label=job.label,
         keyword=ctx.keyword,
+        workflow_kind=ctx.workflow_kind,
+        review_draft=ctx.review_draft,
         comment=ctx.comment,
         image_paths=list(ctx.image_paths),
         use_crawling=ctx.use_crawling,
@@ -1677,6 +2046,20 @@ def _job_info_text(job: QueuedJob) -> str:
     JobQueueManager.update_pending 참조 — 진행 중인 작업은 대상이 아니라 조회만 한다).
     """
     ctx = job.context
+    if ctx.workflow_kind == "style":
+        return "\n".join([
+            f"작업 #{job.job_id}: {job.label} ({job.status})",
+            "작업 방식: 첫 검색 글 스타일 분석",
+            f"키워드: {ctx.keyword}",
+            f"AI 모델: {config.ai_model_label(ctx.ai_model)}",
+            f"발행 계정: {pipeline.account_label(ctx.account_id)}",
+            f"크롤링: 항상 사용 ({ctx.crawl_count}건)",
+            "AI 이미지 생성: 첫 글 이미지 수에 맞춰 자동 결정 (최대 15장)",
+            "AGENTS.md: 첫 글 분석 결과로 작업별 자동 생성",
+            "작성 관점: 방문 전 조사, 원문 복사 금지",
+            f"네이버 로그인: {'수동' if ctx.login_mode == 'manual' else '자동'}",
+            f"코멘트: {ctx.comment or '(없음)'}",
+        ])
     return "\n".join(
         [
             f"작업 #{job.job_id}: {job.label} ({job.status})",
@@ -1705,6 +2088,7 @@ class JobQueueManager(QObject):
     changed = Signal()  # 대기열/현재 작업 상태가 바뀔 때(추가/시작/완료)마다 발행
     job_step = Signal(int, str, str)  # job_id, step name, status
     job_done = Signal(int, dict)  # job_id, result
+    review_requested = Signal(object, object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -1839,6 +2223,14 @@ class JobQueueManager(QObject):
             self.changed.emit()
         return moved
 
+    def is_busy(self) -> bool:
+        """현재 실행 중인 파이프라인 워커가 있는지(창 닫기 확인용)."""
+        return self._worker is not None and self._worker.isRunning()
+
+    def current_worker(self) -> "PipelineWorker | None":
+        """현재 실행 중인 워커(창 닫기 시 wait()용). is_busy()가 False면 의미 없다."""
+        return self._worker
+
     def cancel_current(self) -> bool:
         """진행 중인 작업을 취소한다(사용자 요청: 진행 중인 작업 삭제 기능).
 
@@ -1882,6 +2274,7 @@ class JobQueueManager(QObject):
         self.changed.emit()
 
         worker = PipelineWorker(job.context)
+        worker.review_requested.connect(lambda path, w=worker: self.review_requested.emit(w, path))
         worker.step_signal.connect(lambda name, status, jid=job.job_id: self.job_step.emit(jid, name, status))
         worker.finished_signal.connect(lambda result, jid=job.job_id: self._on_worker_finished(jid, result))
         self._worker = worker
@@ -1895,6 +2288,15 @@ class JobQueueManager(QObject):
         self._current.status = "취소됨" if canceled else ("실패" if failed else "완료")
         self.job_done.emit(job_id, result)
         self._current = None
+        # finished_signal은 PipelineWorker.run()이 emit()한 직후(스레드가 실제로 완전히
+        # 끝나기 직전)에 도착하는 큐잉 신호라, 여기서 곧바로 self._worker = None으로
+        # 마지막 파이썬 참조를 끊으면 아직 실행 중인 QThread가 GC될 수 있다 —
+        # "QThread: Destroyed while thread is still running" 경고와 함께 앱 전체가
+        # 죽는 문제가 실측 확인됐다(_step_worker_busy 주석의 GC 문제와 동일 계열).
+        # wait()로 네이티브 스레드가 실제로 끝난 뒤에만 참조를 놓는다(이미 끝나기
+        # 직전이라 즉시 반환된다).
+        if self._worker is not None:
+            self._worker.wait()
         self._worker = None
         self._persist()
         self.changed.emit()
@@ -1909,10 +2311,16 @@ class StepWorker(QThread):
     """
 
     finished_signal = Signal(object)
+    review_requested = Signal(object)
+    request_review = PipelineWorker.request_review
+    resolve_review = PipelineWorker.resolve_review
 
     def __init__(self, func: Callable[[], object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._func = func
+        self.cancel_event = threading.Event()
+        self.review_event = threading.Event()
+        self.review_approved = False
 
     def run(self) -> None:
         self.finished_signal.emit(self._func())
@@ -1927,6 +2335,8 @@ class RunLogTab(QWidget):
     클릭 시 _ensure_context()가 work_dir을 한 번 정하고 이후 클릭들은 이를 재사용한다.
     """
 
+    progress_changed = Signal(str, str)
+    review_requested = Signal(object, object)
     STEP_NAMES = ("crawl", "generate", "image_gen", "image_search", "publish")
     STEP_LABELS = {
         "crawl": "크롤링",
@@ -2035,6 +2445,7 @@ class RunLogTab(QWidget):
         표시해("running (12초 경과)") 실제로 진행 중인지, 멈춰 있는 건지 구분할 수 있게
         한다 — 이전에는 "running" 문구가 고정돼 있어 codex exec처럼 수십 초~수 분 걸리는
         작업이 오래 걸리는 중인지 멈춘 건지 알 방법이 없었다."""
+        self.progress_changed.emit(name, status)
         label = self.STEP_LABELS.get(name, name)
         if status == "running":
             self._step_start_times[name] = time.monotonic()
@@ -2347,7 +2758,19 @@ class RunLogTab(QWidget):
         work_dir = self.work_dir
         login_mode = context.login_mode
         account_id = context.account_id
-        self.step_worker = StepWorker(lambda: pipeline.run_publish(md_path, work_dir, login_mode, account_id))
+        review_enabled = self.input_tab.review_draft_checkbox.isChecked()
+
+        def publish_after_review():
+            if review_enabled:
+                if not worker.request_review(md_path):
+                    return "canceled", None
+            return pipeline.run_publish(md_path, work_dir, login_mode, account_id)
+
+        worker = StepWorker(publish_after_review)
+        self.step_worker = worker
+        worker.review_requested.connect(lambda path: self.review_requested.emit(worker, path))
+        if review_enabled:
+            self._set_step_status("publish", "review")
         self.step_worker.finished_signal.connect(self._on_publish_only_finished)
         self.step_worker.start()
 
@@ -2617,7 +3040,8 @@ class MultiTaskTab(QWidget):
         if job is None:
             self.log_view.append(f"[작업 편집] 작업 #{job_id}을(를) 찾을 수 없습니다(이미 시작됐을 수 있음)")
             return
-        dialog = TaskEditDialog(_job_to_task_item(job), self)
+        dialog_class = StyleTaskEditDialog if job.context.workflow_kind == "style" else TaskEditDialog
+        dialog = dialog_class(_job_to_task_item(job), self)
         dialog.setWindowTitle(f"작업 #{job_id} 편집")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2691,6 +3115,10 @@ class MultiTaskTab(QWidget):
         if not jobs:
             return
 
+        if any(job.context.workflow_kind == "style" for job in jobs):
+            self.log_view.append("[일괄 설정 변경] 스타일 작업은 개별 편집해 주세요")
+            return
+
         dialog = BulkQueueEditDialog(jobs[0].context, len(jobs), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2715,13 +3143,100 @@ class MultiTaskTab(QWidget):
 
         # status가 "running"이면 그 단계가 아직 진행 중이라는 뜻이라 진행률에 반영하지
         # 않고, 단계가 끝난(success/failed/skipped/reused) 시점에만 완료로 센다.
-        if job_id == self._current_job_id and status != "running":
+        if job_id == self._current_job_id and status not in {"running", "review"}:
             self._finished_steps.add(name)
             self.current_progress.setValue(len(self._finished_steps))
 
     def _on_job_done(self, job_id: int, result: dict) -> None:
         failed = any(step.get("status") == "failed" for step in result.get("steps", {}).values())
-        self.log_view.append(f"[작업 #{job_id}] {'실패' if failed else '완료'}")
+        canceled = any(step.get("status") == "canceled" for step in result.get("steps", {}).values())
+        outcome = "취소됨" if canceled else ("실패" if failed else "완료")
+        self.log_view.append(f"[작업 #{job_id}] {outcome}")
+        if failed:
+            for step in result.get("steps", {}).values():
+                if step.get("status") == "failed" and step.get("error"):
+                    self.log_view.append(f"[작업 #{job_id}] {step['error']}")
+
+
+class StyleTaskManager(TaskManager):
+    def __init__(self, parent: QObject | None = None) -> None:
+        QObject.__init__(self, parent)
+        from style_multitask.storage import load_style_tasks
+        self.tasks = load_style_tasks()
+
+    def _persist(self) -> None:
+        from style_multitask.storage import save_style_tasks
+        save_style_tasks(self.tasks)
+        self.changed.emit()
+
+
+class StyleMultiTaskTab(MultiTaskTab):
+    def __init__(
+        self, job_queue: JobQueueManager, task_manager: TaskManager, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(job_queue, task_manager, parent)
+        self.new_task_button.setText("새 스타일 분석 작업")
+        hint = QLabel("첫 검색 글 분석 → 작성 지침 자동 생성 → 글·이미지 작성\n이미지 수와 AGENTS.md는 직접 설정할 필요가 없습니다.")
+        hint.setWordWrap(True)
+        self.layout().insertWidget(0, hint)
+
+    def _on_new_task(self) -> None:
+        dialog = StyleTaskEditDialog(None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dialog.bulk_mode_checkbox.isChecked():
+            self.task_manager.add(dialog.get_task_item())
+            return
+        for task in dialog.get_task_items():
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+
+    def _on_edit_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 편집] 먼저 목록에서 태스크를 선택하세요")
+            return
+        dialog = StyleTaskEditDialog(task, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task_manager.update(task.task_id, dialog.get_task_item())
+
+    def _on_enqueue_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[대기열에 추가] 먼저 목록에서 태스크를 선택하세요")
+            return
+        try:
+            context = task.to_pipeline_context()
+        except ValueError as exc:
+            self.log_view.append(f"[대기열에 추가 실패] {exc}")
+            return
+        job = self.job_queue.enqueue(context, task.label)
+        self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+        self.task_manager.remove(task.task_id)
+
+    def _on_enqueue_all(self) -> None:
+        if not self.task_manager.tasks:
+            self.log_view.append("[전체 대기열에 추가] 저장된 태스크가 없습니다")
+            return
+        for task in list(self.task_manager.tasks):
+            try:
+                context = task.to_pipeline_context()
+            except ValueError as exc:
+                self.log_view.append(f"[대기열에 추가 실패] {task.label}: {exc}")
+                continue
+            job = self.job_queue.enqueue(context, task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+            self.task_manager.remove(task.task_id)
+
+    def _refresh_tasks(self) -> None:
+        selected_id = self._selected_task_id()
+        self.task_list.clear()
+        for task in self.task_manager.tasks:
+            item = QListWidgetItem(f"{task.label} — 크롤링 {task.crawl_count}건, 이미지 수 자동 분석")
+            item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            self.task_list.addItem(item)
+            if task.task_id == selected_id:
+                self.task_list.setCurrentItem(item)
 
 
 class ResultTab(QWidget):
@@ -2774,17 +3289,23 @@ class MainWindow(QMainWindow):
 
         self.job_queue = JobQueueManager(self)
         self.task_manager = TaskManager(self)
+        self.style_task_manager = StyleTaskManager(self)
 
         self.input_tab = InputTab()
         self.agents_editor_tab = AgentsEditorTab()
+        self.agents_editor_tab.file_created.connect(
+            lambda: _populate_agents_md_combo(
+                self.input_tab.agents_md_combo, self.input_tab.agents_md_path
+            )
+        )
         self.run_log_tab = RunLogTab(self.input_tab, self.job_queue)
         self.multi_task_tab = MultiTaskTab(self.job_queue, self.task_manager)
+        self.style_multi_task_tab = StyleMultiTaskTab(self.job_queue, self.style_task_manager)
         self.result_tab = ResultTab()
 
         # RunLogTab/MultiTaskTab이 job_queue 시그널에 다 연결된 뒤에 복원해야 대기열
         # 상태가 UI에 정상 반영된다(먹통으로 강제 종료 등으로 남아있던 대기 중 작업을
         # 이어서 진행 — queue_state.json, JobQueueManager.restore 참조).
-        self.job_queue.restore()
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.input_tab, "입력")
@@ -2792,13 +3313,24 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.run_log_tab, "실행·로그")
         self.tabs.addTab(self.multi_task_tab, "멀티 작업")
         self.tabs.addTab(self.result_tab, "결과")
+        self.tabs.addTab(self.style_multi_task_tab, "스타일 분석 멀티작업")
+        self.draft_review_tab = DraftReviewTab()
+        self.tabs.addTab(self.draft_review_tab, "초안 검토")
+        self.job_queue.review_requested.connect(self._open_draft_review)
+        self.run_log_tab.review_requested.connect(self._open_draft_review)
+        self.job_queue.job_done.connect(self._finish_draft_review)
 
         self.log_panel = LogPanel()
+        self._summary_job_id = None
+        self.job_queue.changed.connect(self._sync_summary_job)
+        self.run_log_tab.progress_changed.connect(self._update_summary_step)
+        self.job_queue.job_done.connect(lambda _job_id, result: self.log_panel.finish_progress(result))
         self._log_handler = QtLogHandler(self.log_panel.log_signal, self.log_panel.codex_auth_error)
         self._log_handler.setLevel(logging.INFO)
         logging.getLogger().addHandler(self._log_handler)
         self._last_codex_auth_warning = 0.0
         self.log_panel.codex_auth_error.connect(self._on_codex_auth_error)
+        self.job_queue.restore()
 
         # 창이 닫히거나(closeEvent) 테스트에서 위젯이 조기 파괴되는 경우(qtbot) 모두 대비해
         # root logger에서 핸들러를 제거한다 — 남겨두면 LogPanel의 Qt 오브젝트가 사라진 뒤
@@ -2823,7 +3355,85 @@ class MainWindow(QMainWindow):
 
         logger.info("MainWindow 초기화 완료: %d개 탭 생성", self.tabs.count())
 
+    def _sync_summary_job(self) -> None:
+        job = self.job_queue.current_job()
+        if job is not None and job.job_id != self._summary_job_id:
+            self._summary_job_id = job.job_id
+            self.log_panel.start_progress(f"작업 #{job.job_id} · {job.label}", RunLogTab.STEP_NAMES)
+
+    def _open_draft_review(self, worker, path) -> None:
+        if worker.cancel_event.is_set():
+            worker.resolve_review(False)
+            return
+        job = self.job_queue.current_job()
+        if job:
+            job.status = "검토 대기"
+            self.job_queue.changed.emit()
+        self.draft_review_tab.open_draft(worker, path)
+        self.tabs.setCurrentWidget(self.draft_review_tab)
+
+    def _finish_draft_review(self, _job_id, _result) -> None:
+        if self.draft_review_tab.worker:
+            self.draft_review_tab.end_review()
+
+    def _update_summary_step(self, name: str, status: str) -> None:
+        job = self.job_queue.current_job()
+        if job and job.status == "검토 대기" and status == "running":
+            job.status = "진행중"
+            self.job_queue.changed.emit()
+        if self.job_queue.current_job() is None:
+            if status == "running":
+                self.log_panel.start_progress("단계별 실행", (name,))
+            self.log_panel.update_progress(name, status)
+            if status not in {"running", "review"}:
+                self.log_panel.finish_progress({"steps": {name: {"status": status}}})
+                if self.draft_review_tab.worker:
+                    self.draft_review_tab.end_review()
+        else:
+            self.log_panel.update_progress(name, status)
+
     def closeEvent(self, event) -> None:
+        """창을 닫기 전에 백그라운드 QThread(전체 실행 파이프라인/단독 단계 실행/로그인)가
+        실행 중인지 확인한다.
+
+        이전에는 실행 중인 워커가 있어도 그냥 닫혀 버렸는데, 그러면 파이썬 인터프리터
+        종료 과정에서 아직 끝나지 않은 QThread에 대한 마지막 참조(self.job_queue._worker,
+        run_log_tab.step_worker, input_tab._prelogin_worker)가 사라지면서 "QThread:
+        Destroyed while thread is still running" 경고와 함께 앱이 죽는 문제가
+        _on_worker_finished와 같은 원인으로 재현됐다. 실행 중인 작업이 있으면 사용자에게
+        확인을 받고, 닫기로 하면 취소 신호를 보낸 뒤 각 워커가 실제로 끝날 때까지
+        wait()로 기다렸다가 닫는다.
+        """
+        running_workers: list[QThread] = []
+        if self.job_queue.is_busy():
+            worker = self.job_queue.current_worker()
+            if worker is not None:
+                running_workers.append(worker)
+        step_worker = self.run_log_tab.step_worker
+        if step_worker is not None and step_worker.isRunning():
+            running_workers.append(step_worker)
+        prelogin_worker = self.input_tab.prelogin_worker()
+        if prelogin_worker is not None and prelogin_worker.isRunning():
+            running_workers.append(prelogin_worker)
+
+        if running_workers:
+            reply = QMessageBox.question(
+                self,
+                "실행 중인 작업이 있습니다",
+                "아직 끝나지 않은 작업(전체 실행/단계 실행/로그인)이 있습니다.\n"
+                "지금 닫으면 진행 중인 작업이 취소됩니다. 그래도 닫으시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.job_queue.cancel_current()
+            if step_worker is not None:
+                step_worker.cancel_event.set()
+            for worker in running_workers:
+                worker.wait()
+
         logging.getLogger().removeHandler(self._log_handler)
         super().closeEvent(event)
 

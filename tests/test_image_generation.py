@@ -4,6 +4,20 @@ import config
 import pipeline
 
 
+def test_codex_image_prompts_require_file_copy_and_verified_save():
+    context = pipeline.PipelineContext(keyword="키워드", generate_images=True)
+    prompts = [
+        pipeline._build_inline_image_instruction(context, "codex"),
+        pipeline._build_image_generation_prompt(context, "본문", "제목.md"),
+    ]
+    for prompt in prompts:
+        assert "Base64 이미지 데이터나 data URL을 exec_command/PowerShell 명령줄 인자에 넣지 마" in prompt
+        assert "Join-Path -Path (Get-Location).Path -ChildPath" in prompt
+        assert "-ErrorAction Stop" in prompt
+        assert "크기가 0보다 큰지 확인" in prompt
+        assert "과거 이미지로 대체하지 마" in prompt
+
+
 def test_build_image_generation_prompt_defaults_to_one_image():
     context = pipeline.PipelineContext(keyword="키워드", generate_images=True)
     prompt = pipeline._build_image_generation_prompt(context, "", None)
@@ -130,3 +144,50 @@ def test_run_image_generation_inserts_into_existing_md_and_normalizes_paths(tmp_
     text = md_path.read_text(encoding="utf-8")
     assert "images/generated_0.png" in text
     assert str(images_dir.resolve()) not in text
+
+
+def test_image_save_prompt_handles_data_url_without_shell():
+    prompt = pipeline._build_inline_image_instruction(
+        pipeline.PipelineContext(keyword="test", generate_images=True), "codex"
+    )
+    assert "r.image_url" in prompt
+    assert "tools.mcp__node_repl__js" in prompt
+    assert "fs.writeFile(dest, bytes)" in prompt
+    assert "image_generation_error.txt" in prompt
+
+
+def test_remove_missing_image_links_keeps_existing_and_remote(tmp_path):
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "ok.png").write_bytes(b"image")
+    (images / "empty.png").touch()
+    md = tmp_path / "article.md"
+    md.write_text(
+        "![ok](images/ok.png)\n![missing](images/missing.png)\n"
+        "[missing ordinary link](images/empty.png)\n"
+        "![remote](https://example.com/a.png)\n[shop](https://example.com)",
+        encoding="utf-8",
+    )
+    assert pipeline._remove_missing_image_links(md) == ["images/missing.png", "images/empty.png"]
+    text = md.read_text(encoding="utf-8")
+    assert "![ok](images/ok.png)" in text
+    assert "missing" not in text
+    assert "https://example.com/a.png" in text
+    assert "[shop]" in text
+
+
+def test_generation_records_missing_image_reason_and_removes_link(tmp_path, monkeypatch):
+    def fake_run(args, **kwargs):
+        (tmp_path / "article.md").write_text(
+            "# Article\n[image](images/missing.png)", encoding="utf-8"
+        )
+        assert kwargs["tee_path"].name == "generation_trace.log"
+        return 0
+
+    monkeypatch.setattr(pipeline.subprocess_runner, "run", fake_run)
+    context = pipeline.PipelineContext(keyword="article", generate_images=True)
+    status, md, images = pipeline.run_generation(context, tmp_path, [])
+    assert status == "success"
+    assert images == []
+    assert "missing.png" not in md.read_text(encoding="utf-8")
+    assert "rc=0" in (tmp_path / "output/image_generation_error.txt").read_text(encoding="utf-8")

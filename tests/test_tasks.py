@@ -161,7 +161,7 @@ def test_task_edit_dialog_loads_existing_task_ai_model(qtbot):
     dialog = TaskEditDialog(task=task)
     qtbot.addWidget(dialog)
 
-    assert dialog.ai_model_combo.currentData() == "codex:gpt-5.6-sol"
+    assert dialog.ai_model_combo.currentData() == "codex:gpt-6.1-sol"
 
 
 def test_task_manager_crud_persists_and_emits_changed(tmp_path, monkeypatch, qtbot):

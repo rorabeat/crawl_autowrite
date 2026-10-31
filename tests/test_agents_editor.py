@@ -1,10 +1,62 @@
 """Task 004 완료 조건 검증: agents_editor 파일 I/O 및 AgentsEditorTab 저장/취소 동작."""
 
 from PySide6.QtCore import Qt
+import pytest
 
 import agents_editor
 import app
 import config
+
+
+def test_create_agents_md_preserves_existing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path)
+    path = agents_editor.create_agents_md("새 지침")
+    assert path.name == "새 지침.md"
+    assert path.read_text(encoding="utf-8") == ""
+    path.write_text("기존 내용", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        agents_editor.create_agents_md("새 지침.md")
+    assert path.read_text(encoding="utf-8") == "기존 내용"
+
+
+@pytest.mark.parametrize("name", ["", "../outside", "a/b", "a\\b", "CON", "bad:", "..", ".md"])
+def test_create_agents_md_rejects_invalid_names(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path)
+    with pytest.raises(ValueError):
+        agents_editor.create_agents_md(name)
+
+
+def test_agents_editor_creates_selects_and_saves_new_file(qtbot, tmp_path, monkeypatch):
+    original = tmp_path / "AGENTS.md"
+    original.write_text("원본", encoding="utf-8")
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path)
+    monkeypatch.setattr(config, "AGENTS_MD_PATH", original)
+    monkeypatch.setattr(app.QInputDialog, "getText", lambda *args: ("새 지침", True))
+    tab = app.AgentsEditorTab()
+    qtbot.addWidget(tab)
+    qtbot.mouseClick(tab.new_button, Qt.MouseButton.LeftButton)
+    created = tmp_path / "새 지침.md"
+    assert tab.agents_file_combo.currentData() == str(created)
+    assert tab.text_edit.toPlainText() == ""
+    tab.text_edit.setPlainText("새 규칙")
+    qtbot.mouseClick(tab.save_button, Qt.MouseButton.LeftButton)
+    assert created.read_text(encoding="utf-8") == "새 규칙"
+    assert original.read_text(encoding="utf-8") == "원본"
+
+
+def test_agents_editor_new_keeps_unsaved_edits_when_declined(qtbot, tmp_path, monkeypatch):
+    original = tmp_path / "AGENTS.md"
+    original.write_text("원본", encoding="utf-8")
+    monkeypatch.setattr(config, "AGENTS_DIR", tmp_path)
+    monkeypatch.setattr(config, "AGENTS_MD_PATH", original)
+    monkeypatch.setattr(app.QInputDialog, "getText", lambda *args: ("새 지침", True))
+    monkeypatch.setattr(app.QMessageBox, "question", lambda *args: app.QMessageBox.StandardButton.No)
+    tab = app.AgentsEditorTab()
+    qtbot.addWidget(tab)
+    tab.text_edit.setPlainText("작업 중")
+    qtbot.mouseClick(tab.new_button, Qt.MouseButton.LeftButton)
+    assert tab.text_edit.toPlainText() == "작업 중"
+    assert not (tmp_path / "새 지침.md").exists()
 
 
 def test_load_and_save_agents_md_roundtrip(tmp_path):

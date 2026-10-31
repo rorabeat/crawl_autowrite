@@ -324,3 +324,17 @@
 문제 수정"(`NaverAutoWrite/naver_login.py`, `app.py`, `pipeline.py`)은 **아직 커밋되지
 않음** — 사용자가 커밋/푸시를 요청하면 이 파일들이 대상이다. 그 외
 나머지는 전부 `origin/main`에 반영됨(마지막 확인 커밋 `077d5ba`).
+
+## 2026-10-27 신규 요청 — 검색 결과 스타일 기반 멀티 작업 맥락
+
+기존 로직을 유지하며 격리된 새 폴더와 멀티 작업 유사 탭을 추가하는 요청. 크롤링 기본 3건, 첫 검색글의 말투·글자수·이미지 수를 분석한 AGENTS.md, 원문 복사 금지, 방문 전 조사 관점, 이미지 최대 15장. 현재 [0] 조사 완료, [1] 사용자 기준 답변 대기이며 구현 전이다.
+
+기존 코드: `app.py:1532` 작업 관리자, `:1700` 공유 대기열, `:2384` 멀티 탭, `:2790` 창; `pipeline.py:373` 크롤링, `:398` 경로순 정렬로 검색 순위 소실, `:540` 프롬프트, `:822` 생성, `:1161` 파이프라인. 크롤러 `NaverBlogCrawlingByPlayWright/blogcontentsClawring.py:463`은 URL·작성자·날짜·제목·본문 텍스트만 저장하고 이미지 수·HTML은 저장하지 않는다. 첫 결과 식별과 본문 이미지 분석은 별도 설계가 필요하다. 기존 생성 성공은 종료 코드 및 Markdown 존재 중심이고 이미지 정확한 수를 보장하지 않으며 Claude 경로는 이미지 생성 대신 URL 다운로드다.
+
+권장 검토안: 첫 결과 실패 시 명시적 실패, 본문 이미지 수 0~15, 글 길이 허용오차 명시, 실제 이미지 생성 지원 모델 제약을 새 기능에만 적용. 모두 미확정. 자세한 진행은 `memory-bank/handoff.md` 및 `dashboard.html` 참조.
+
+## 최신 완료 — 모델·이미지 도구 목록 (2026-10-27)
+`config.py` 공통 목록: GPT-6.1 Sol 기본, GPT-6.1 Terra, GPT-6 Astra, GPT-6 Sol, GPT-6 Luna. 공식 Codex 문서와 로컬 CLI 0.164.0 models_cache의 list 모델을 확인했다. GPT-5.5/5.6 및 Tera/Runa 구형값은 resolve_ai_model에서 최신 선택값으로 해석하며 사용자 저장 파일은 변경하지 않는다. app.py의 4개 선택창 모두 동일 목록·이미지 도움말 사용. Claude sonnet/haiku 최신 별칭 유지(공식 현재 5.5; 로컬 재정의 가능), 이미지 도구는 WebSearch/WebFetch 검색이다. Codex imagegen은 GPT Image 2.5 Flare 및 Luna Low를 프롬프트로 요청한다. 내장 도구에 모델/품질 고정 인자가 없으면 기본 사용, 별도 API 호출로 전환 금지. pipeline.py의 인라인/별도 이미지 프롬프트 모두 반영. 전체 tests 145 passed(9.74s), py_compile config/app/pipeline 통과. 실제 AI 호출 미실행, 실행 중인 앱은 재실행해야 새 목록이 보인다. 이전 스타일 탭 구현·143 테스트 완료 이력은 handoff.md 참조. 다음 할 일: 사용자 앱 재실행 후 실제 선택/실행 확인.
+
+## 최신 완료 — 스타일 작업 설정 UI 정리
+사용자 화면은 기존 일반 TaskEditDialog였음. 기존 일반 옵션은 유지하면서 제목을 새 일반 태스크/일반 태스크 편집으로 구분하고 스타일 탭 안내 추가. StyleTaskEditDialog는 새 스타일 분석 작업/스타일 분석 작업 편집 제목과 자동 설정 설명(항상 크롤링, 이미지 첫 글 수 최대15, AGENTS 자동생성, 방문 전 관점)을 표시한다. StyleMultiTaskTab의 생성 버튼과 상단 안내 보강. _job_info_text는 workflow_kind=style에서 이미지 사용 안 함/AGENTS 기본값이 아니라 자동 결정/자동생성으로 표시한다. backend 변경 없음. 실제 AI/네이버 실행 없음. 실행 중 앱은 재시작 필요.

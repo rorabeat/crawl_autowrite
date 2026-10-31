@@ -600,3 +600,5 @@ c:\Users\d2njj\Downloads\KakaoTalk_20260717_095712319_01.jpg md 파일 생성시
 
 로그인 페이지링크로 바로 가게해줘 지금 크롬만 표시 되고 있어 , 대기작업 시작, 작업시작을 누르면 첫번째로 로그인이되게해
 
+
+**AI 처리 요약:** `NaverAutoWrite/naver_login.py`의 로그인 함수가 로그인 탭을 닫아버려서(그게 CDP 컨텍스트의 유일한 탭이었던 경우) 창 자체가 사라지고, 그 직후 `main.py`가 새 탭을 열려다 `Target.createTarget: Failed to open a new tab` 에러로 실패하던 버그를 

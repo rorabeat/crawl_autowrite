@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>검색 결과 스타일 기반 멀티 작업 — 진행상황 대시보드</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --surface: #ffffff;
+    --border: #e4e4e7;
+    --text: #18181b;
+    --text-muted: #71717a;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --good: #16a34a;
+    --good-soft: #dcfce7;
+    --warn: #d97706;
+    --warn-soft: #fef3c7;
+    --bad: #dc2626;
+    --bad-soft: #fee2e2;
+    --idle: #a1a1aa;
+    --idle-soft: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f0f12;
+      --surface: #18181b;
+      --border: #2b2b31;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --accent: #60a5fa;
+      --accent-soft: #1e3a5f;
+      --good: #4ade80;
+      --good-soft: #14532d;
+      --warn: #fbbf24;
+      --warn-soft: #451a03;
+      --bad: #f87171;
+      --bad-soft: #450a0a;
+      --idle: #71717a;
+      --idle-soft: #27272a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f0f12;
+    --surface: #18181b;
+    --border: #2b2b31;
+    --text: #f4f4f5;
+    --text-muted: #a1a1aa;
+    --accent: #60a5fa;
+    --accent-soft: #1e3a5f;
+    --good: #4ade80;
+    --good-soft: #14532d;
+    --warn: #fbbf24;
+    --warn-soft: #451a03;
+    --bad: #f87171;
+    --bad-soft: #450a0a;
+    --idle: #71717a;
+    --idle-soft: #27272a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    line-height: 1.5;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  header { margin-bottom: 24px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .meta-line { color: var(--text-muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 12px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+
+  /* 6단계 스테퍼 */
+  .stepper { display: flex; gap: 6px; flex-wrap: wrap; }
+  .step {
+    flex: 1 1 120px;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: var(--idle-soft);
+    color: var(--text-muted);
+    font-size: 13px;
+    border: 1px solid var(--border);
+  }
+  .step.done { background: var(--good-soft); color: var(--good); border-color: transparent; }
+  .step.active { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 700; }
+  .step .n { font-size: 11px; opacity: .8; display: block; margin-bottom: 2px; }
+
+  /* 요약 숫자 카드 */
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+  .stat { background: var(--idle-soft); border-radius: 10px; padding: 14px; }
+  .stat .label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+  .stat .value { font-size: 20px; font-weight: 700; }
+  .stat .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .stat .sub.over { color: var(--bad); }
+  .stat .sub.under { color: var(--good); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 600; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .badge.done { background: var(--good-soft); color: var(--good); }
+  .badge.active { background: var(--accent-soft); color: var(--accent); }
+  .badge.wait { background: var(--idle-soft); color: var(--idle); }
+  .badge.fail { background: var(--bad-soft); color: var(--bad); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+
+  .model-tag {
+    display: inline-block; padding: 1px 8px; border-radius: 6px;
+    font-size: 12px; font-family: ui-monospace, "Cascadia Code", monospace;
+    background: var(--idle-soft); color: var(--text);
+  }
+  .model-tag.sonnet { background: var(--accent-soft); color: var(--accent); }
+  .model-tag.haiku { background: var(--good-soft); color: var(--good); }
+  .model-tag.sol { background: var(--accent-soft); color: var(--accent); }
+  .model-tag.terra { background: var(--warn-soft); color: var(--warn); }
+  .model-tag.luna { background: var(--good-soft); color: var(--good); }
+
+  .bar-track { background: var(--idle-soft); border-radius: 999px; height: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+  .bar-fill.over { background: var(--bad); }
+
+  .log { font-size: 13px; }
+  .log-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .log-item:last-child { border-bottom: none; }
+  .log-time { color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, monospace; font-size: 12px; }
+
+  .note { color: var(--text-muted); font-size: 12px; margin-top: 10px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>검색 결과 스타일 기반 멀티 작업</h1>
+    <div class="meta-line">
+      <span>시작: 2026-10-27</span>
+      <span>최종 갱신: 2026-10-27</span>
+      <span>조율자: meta-workflow</span>
+      <span>상태: 구현 및 오프라인 검증 완료</span>
+    </div>
+  </header>
+
+  <!-- 6단계 진행 스테퍼: 각 step에 done/active/(비움=대기) 클래스를 채워 넣는다 -->
+  <section class="card">
+    <h2>6단계 진행</h2>
+    <div class="stepper">
+      <div class="step done"><span class="n">0</span>맥락</div>
+      <div class="step active"><span class="n">1</span>의도</div>
+      <div class="step done"><span class="n">2</span>스펙</div>
+      <div class="step done"><span class="n">3</span>분해</div>
+      <div class="step done"><span class="n">4</span>구현</div>
+      <div class="step done"><span class="n">5</span>검증</div>
+      <div class="step done"><span class="n">6</span>개선</div>
+    </div>
+    <p class="note">현재 위치: [6] 오프라인 구현·검증·인계 완료. 실제 네이버·AI·발행 라이브 검증은 남음.</p>
+  </section>
+
+  <!-- 예상 vs 실제 요약 -->
+  <section class="card">
+    <h2>예상 대비 실제</h2>
+    <div class="stat-grid">
+  <div class="stat"><div class="label">예상 토큰</div><div class="value">입력 76,000 / 출력 28,000</div><div class="sub">계획 추정</div></div>
+  <div class="stat"><div class="label">실제 토큰</div><div class="value">계산 불가</div><div class="sub">에이전트 telemetry 없음</div></div>
+  <div class="stat"><div class="label">예상 비용 (USD)</div><div class="value">계산 불가</div><div class="sub">공식 단가 미확인</div></div>
+  <div class="stat"><div class="label">실제 비용 (USD)</div><div class="value">계산 불가</div><div class="sub">토큰 구분·단가 미확인</div></div>
+  <div class="stat"><div class="label">예상 소요시간</div><div class="value">170~275분</div><div class="sub">조각 합계 추정</div></div>
+  <div class="stat"><div class="label">실제 소요시간</div><div class="value">측정 불가</div><div class="sub">조각별 시각 미수집</div></div>
+</div></section>
+
+  <!-- 조각별 진행 테이블: [3] 분해에서 정한 조각 수만큼 <tr>을 복제한다 -->
+  <section class="card">
+    <h2>조각별 진행상황</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>조각</th>
+          <th>모델</th>
+          <th>추론 강도</th>
+          <th>상태</th>
+          <th>예상 토큰 (입력/출력)</th>
+          <th>실제 토큰 (입력/출력)</th>
+          <th>예상 비용 (USD)</th>
+          <th>실제 비용 (USD)</th>
+          <th>예상 시간</th>
+          <th>실제 시간</th>
+          <th>비고</th>
+        </tr>
+      </thead>
+      <tbody><tr><td>A 검색·HTML 분석</td><td><span class="model-tag sol">gpt-6-sol</span></td><td>high</td><td><span class="badge done">완료</span></td><td>12,000 / 5,000</td><td>계산 불가</td><td>계산 불가</td><td>계산 불가</td><td>30~45분</td><td>미수집</td><td>당초 terra 예상, 실제 sol</td></tr>
+<tr><td>B 생성·검증·발행</td><td><span class="model-tag sol">gpt-6-sol</span></td><td>high</td><td><span class="badge done">완료</span></td><td>22,000 / 9,000</td><td>계산 불가</td><td>계산 불가</td><td>계산 불가</td><td>50~80분</td><td>미수집</td><td>5-b 반려 후 스펙·코드 수정</td></tr>
+<tr><td>C Qt 탭·큐 연결</td><td><span class="model-tag terra">gpt-6.1-terra</span></td><td>medium</td><td><span class="badge done">완료</span></td><td>16,000 / 6,000</td><td>계산 불가</td><td>계산 불가</td><td>계산 불가</td><td>35~60분</td><td>미수집</td><td>UI 담당</td></tr>
+<tr><td>D 통합·회귀·문서</td><td><span class="model-tag terra">gpt-6.1-terra</span></td><td>medium</td><td><span class="badge done">완료</span></td><td>12,000 / 4,000</td><td>계산 불가</td><td>계산 불가</td><td>계산 불가</td><td>30~50분</td><td>미수집</td><td>전체 pytest 143건</td></tr>
+<tr><td>E 독립 5-b</td><td><span class="model-tag terra">gpt-6.1-terra</span></td><td>medium</td><td><span class="badge done">오프라인 통과</span></td><td>14,000 / 4,000</td><td>계산 불가</td><td>계산 불가</td><td>계산 불가</td><td>25~40분</td><td>미수집</td><td>실서비스 라이브 검증은 제외</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- 5-a / 5-b 검증 결과 -->
+  <section class="card">
+    <h2>검증 결과</h2>
+    <table>
+      <thead>
+        <tr><th>층</th><th>기준</th><th>결과</th><th>비고</th></tr>
+      </thead>
+      <tbody><tr><td>5-a 게이트</td><td>전체 pytest·py_compile</td><td><span class="badge done">통과</span></td><td>최종 pytest 143 passed (9.57초), 관련 Python 파일 py_compile 통과. 기존 회귀 125 passed (8.95초).</td></tr>
+<tr><td>5-b 외부검증</td><td>독립 에이전트 코드·fixture 리뷰</td><td><span class="badge done">오프라인 통과</span></td><td>첫 리뷰 반려로 [2] 복귀 후 본문 계수·이미지 전수 검증 수정. 재검토 통과. 실제 네이버/AI/발행 라이브 미검증.</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- 타임라인 로그: 최신이 위로 오도록 추가한다 -->
+  <section class="card">
+    <h2>진행 로그</h2>
+    <div class="log">
+      <div class="log-item">
+        <div class="log-time">2026-10-27</div>
+        <div>프로젝트 규칙과 기존 파이프라인을 조사함. 구현 전 사용자 기준 응답 대기.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>다음 액션 / 인계</h2>
+    <p>오프라인 구현·검증 완료. 실제 네이버 페이지, AI 이미지 생성, 발행은 실사용 환경에서 확인한다.</p>
+    <p class="note">전체 인계 내용은 <a href="./handoff.md">handoff.md</a> 참고.</p>
+  </section>
+
+</div>
+</body>
+</html>
+
+
+

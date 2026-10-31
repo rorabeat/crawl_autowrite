@@ -14,10 +14,11 @@ def test_all_skeleton_modules_import_without_error():
         importlib.import_module(module_name)
 
 
-def test_main_window_has_five_tabs(qtbot):
+def test_main_window_has_seven_tabs(qtbot):
     from app import TAB_TITLES, MainWindow
 
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window.tabs.count() == len(TAB_TITLES) == 5
+    assert window.tabs.count() == len(TAB_TITLES) == 7
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == TAB_TITLES

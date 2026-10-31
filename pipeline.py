@@ -49,6 +49,8 @@ class PipelineContext:
     login_mode: str = "auto"
     ai_model: str = config.AI_MODEL_DEFAULT
     account_id: str | None = None
+    workflow_kind: str = "standard"
+    review_draft: bool = False
     step_status: dict[str, str] = field(
         default_factory=lambda: {
             "crawl": "pending",
@@ -86,6 +88,8 @@ class TaskItem:
     login_mode: str = "auto"
     ai_model: str = config.AI_MODEL_DEFAULT
     account_id: str | None = None
+    workflow_kind: str = "standard"
+    review_draft: bool = False
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_pipeline_context(self) -> PipelineContext:
@@ -104,6 +108,8 @@ class TaskItem:
             login_mode=self.login_mode,
             ai_model=self.ai_model,
             account_id=self.account_id,
+            workflow_kind=self.workflow_kind,
+            review_draft=self.review_draft,
         )
 
 
@@ -190,6 +196,7 @@ class InputDefaults:
     agents_md_path: str | None = None
     ai_model: str = config.AI_MODEL_DEFAULT
     account_id: str | None = None
+    review_draft: bool = False
 
 
 def load_input_defaults() -> InputDefaults:
@@ -448,6 +455,42 @@ _WEB_SEARCH_INSTRUCTION = (
 )
 
 
+_IMAGE_FILE_SAVE_INSTRUCTION = (
+    " 이미지 도구는 한 장씩 호출하고 각 반환값을 저장한 다음 다음 장을 요청해줘. "
+    " Promise fulfilled는 생성/저장 성공의 증거가 아니며 r.content만 검사하지 마. "
+    " 반환값이 image_url(data URL)인 경우 아래 functions.exec 패턴으로 저장해줘. "
+    " tools.mcp__node_repl__js가 사용 가능한지 먼저 확인하고 없으면 저장 불가 사유를 보고해줘. "
+    " 이미지 데이터를 text/로그에 출력하지 마. "
+    " 예시(각 이미지마다 고유한 name 사용): "
+    " const r = await tools.image_gen__imagegen({prompt: description}); "
+    " if (typeof r.image_url !== 'string' || !r.image_url.startsWith('data:image/')) "
+    " throw new Error('이미지 도구가 저장 가능한 data URL을 반환하지 않음'); "
+    " const code = `var fs = await import('node:fs/promises'); "
+    "var u = ${JSON.stringify(r.image_url)}; "
+    "var m = /^data:image\\/(png|jpeg|webp);base64,([\\s\\S]+)$/.exec(u); "
+    "if (!m) throw new Error('지원하지 않는 이미지 반환 형식'); "
+    "var dest = 'images/generated-01.' + (m[1] === 'jpeg' ? 'jpg' : m[1]); "
+    "await fs.mkdir('images', {recursive:true}); "
+    "var bytes = Buffer.from(m[2], 'base64'); "
+    "if (!bytes.length) throw new Error('빈 이미지 데이터'); "
+    "await fs.writeFile(dest, bytes); "
+    "nodeRepl.write({path:dest,size:(await fs.stat(dest)).size});`; "
+    " const saved = await tools.mcp__node_repl__js({code,title:'생성 이미지 저장'}); "
+    " if (saved.isError) throw new Error('이미지 파일 저장 실패'); text(saved); "
+    " 반환값에 로컬 파일 경로가 있는 경우 그 경로를 사용해 images/로 복사해줘. "
+    "Base64 이미지 데이터나 data URL을 exec_command/PowerShell 명령줄 인자에 넣지 마"
+    "(Windows CreateProcess 오류 206: 명령줄 길이 제한). "
+    "로컬 경로가 없으면 도구의 파일 저장/다운로드 기능을 사용하고, 지원하지 않으면 "
+    "저장 실패로 보고해줘. generated_images 전체를 재귀 검색하거나 과거 이미지로 대체하지 마. "
+    "PowerShell 복사는 Copy-Item -LiteralPath $source -Destination "
+    "(Join-Path -Path (Get-Location).Path -ChildPath ('images/' + $name)) -ErrorAction Stop "
+    "형식을 사용해줘. Get-Location에는 경로 인자를 넘기지 마. "
+    "저장 후 대상 파일이 존재하고 크기가 0보다 큰지 확인한 뒤에만 본문에 참조하고 "
+    "저장 완료라고 보고해줘. 실패 시 output/image_generation_error.txt에 구체적인 원인을 "
+    "UTF-8로 기록하고 존재하지 않는 이미지 링크는 본문에 넣지 마."
+)
+
+
 _IMAGE_GENERATION_FALLBACK_BAN = (
     "만약 $imagegen 도구가 실패하거나 이미지를 만들 수 없는 상황이면, 대신 PIL 등으로 "
     "직접 이미지를 그리는 파이썬 스크립트를 작성하는 식의 우회 프로그램을 절대 만들지 "
@@ -498,8 +541,8 @@ def _build_inline_image_instruction(context: PipelineContext, backend: str) -> s
         )
     _, model = config.parse_ai_model(context.ai_model)
     quality_hint = (
-        " $imagegen 호출 시 품질 옵션을 gpt-image-1 low(저품질/저비용)로 지정해줘(사용자가 "
-        "이 모델 선택 시 요청한 설정)."
+        " $imagegen 도구가 품질 선택을 지원하면 low(저품질/저비용)를 요청해줘. "
+        "지원하지 않는 품질 인자를 만들어 넣지는 마."
         if model in config.CODEX_LOW_QUALITY_IMAGE_MODELS
         else ""
     )
@@ -508,8 +551,10 @@ def _build_inline_image_instruction(context: PipelineContext, backend: str) -> s
         f'정사각형(1:1) 비율 이미지를 정확히 {count}장 생성해서 반드시 "images" 폴더(현재 '
         f"작업 디렉터리 바로 아래)에 저장해줘. 그리고 글을 작성하면서 각 이미지를 흐름상 "
         f"어울리는 위치에 `![사진 설명](images/파일명)` 형식으로 본문에 직접 포함시켜줘."
-        f"{quality_hint} "
-        f"{_IMAGE_GENERATION_FALLBACK_BAN}"
+        f" 이미지 도구가 모델 선택을 지원하면 {config.IMAGE_GENERATION_MODEL}을 요청해줘. "
+        f"모델 선택을 지원하지 않으면 내장 imagegen 기본 모델을 사용하고, "
+        f"지원하지 않는 인자를 넣거나 별도 API 호출로 전환하지 마.{quality_hint} "
+        f"{_IMAGE_FILE_SAVE_INSTRUCTION} {_IMAGE_GENERATION_FALLBACK_BAN}"
     )
 
 
@@ -717,9 +762,37 @@ def _build_image_generation_prompt(context: PipelineContext, article_text: str, 
 
     prompt = (
         f"$imagegen 키워드 '{context.keyword}'.{comment_part} {save_part}{insert_part}"
-        f" {_IMAGE_GENERATION_FALLBACK_BAN}{reference_part}"
+        f" 도구에서 모델 선택을 지원하면 {config.IMAGE_GENERATION_MODEL}을 요청하고, "
+        f"지원하지 않으면 내장 기본 모델을 사용해줘. 별도 API 호출로 전환하지 마."
+        + (" 품질 선택을 지원하면 low를 요청해줘." if config.parse_ai_model(context.ai_model)[1]
+           in config.CODEX_LOW_QUALITY_IMAGE_MODELS else "")
+        + f" {_IMAGE_FILE_SAVE_INSTRUCTION} {_IMAGE_GENERATION_FALLBACK_BAN}{reference_part}"
     )
     return " ".join(prompt.split())
+
+
+def _remove_missing_image_links(md_path: Path) -> list[str]:
+    """Remove missing local image references, including accidental ordinary links."""
+    if not md_path.exists():
+        return []
+    removed: list[str] = []
+    text = md_path.read_text(encoding="utf-8")
+
+    def replace(match: re.Match) -> str:
+        target = match.group(1)
+        if not target.lower().startswith("images/"):
+            return match.group(0)
+        file = md_path.parent / target
+        if file.is_file() and file.stat().st_size > 0:
+            return match.group(0)
+        removed.append(target)
+        return ""
+
+    cleaned = re.sub(r"!?\[[^\]\n]*\]\((images/[^)\n]+)\)", replace, text)
+    if removed:
+        md_path.write_text(cleaned, encoding="utf-8")
+        logger.warning("존재하지 않는 이미지 링크 제거: %s", ", ".join(removed))
+    return removed
 
 
 def run_image_generation(
@@ -753,6 +826,7 @@ def run_image_generation(
 
     output_dir_path = config.output_dir(work_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    (output_dir_path / "image_generation_error.txt").unlink(missing_ok=True)
     last_message_path = output_dir_path / "image_gen_last_message.txt"
 
     image_extensions = ("*.png", "*.jpg", "*.jpeg", "*.webp")
@@ -783,7 +857,8 @@ def run_image_generation(
     else:
         args = config.build_codex_exec_args([], work_dir, last_message_path, model=model)
         rc = subprocess_runner.run(
-            args, input_text=prompt, timeout=config.AI_GENERATION_TIMEOUT_SEC, cancel_event=cancel_event
+            args, input_text=prompt, tee_path=output_dir_path / "generation_trace.log",
+            timeout=config.AI_GENERATION_TIMEOUT_SEC, cancel_event=cancel_event
         )
 
     if rc == subprocess_runner.CANCELED_RC:
@@ -792,7 +867,10 @@ def run_image_generation(
     after_images: set[Path] = set()
     for pattern in image_extensions:
         after_images |= set(work_dir.rglob(pattern))
-    new_images = sorted(after_images - before_images, key=lambda p: p.stat().st_mtime)
+    new_images = sorted(
+                (p for p in after_images - before_images if p.stat().st_size > 0),
+                key=lambda p: p.stat().st_mtime,
+            )
 
     # 프롬프트로 요청한 장수(context.image_gen_count)보다 codex가 더 많이 생성하는 경우를
     # 대비해, 가장 먼저 생성된 순서로 요청한 장수만큼만 채택하고 나머지는 images/로
@@ -813,6 +891,7 @@ def run_image_generation(
     # 정규화한다.
     if md_filename and md_path is not None and md_path.exists():
         config.normalize_image_paths_in_md(md_path, work_dir)
+        _remove_missing_image_links(md_path)
 
     status = "success" if rc == 0 and result_paths else "failed"
     logger.info("run_image_generation: rc=%d, 생성된 이미지 %d장, status=%s", rc, len(result_paths), status)
@@ -856,6 +935,7 @@ def run_generation(
 
     output_dir_path = config.output_dir(work_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    (output_dir_path / "image_generation_error.txt").unlink(missing_ok=True)
     last_message_path = output_dir_path / "last_message.txt"
 
     if context.generate_images:
@@ -893,7 +973,8 @@ def run_generation(
     else:
         args = config.build_codex_exec_args(abs_images, work_dir, last_message_path, model=model)
         rc = subprocess_runner.run(
-            args, input_text=prompt, timeout=config.AI_GENERATION_TIMEOUT_SEC, cancel_event=cancel_event
+            args, input_text=prompt, tee_path=output_dir_path / "generation_trace.log",
+            timeout=config.AI_GENERATION_TIMEOUT_SEC, cancel_event=cancel_event
         )
 
     title = config.safe_title(context.keyword or "제목없음")
@@ -924,7 +1005,10 @@ def run_generation(
             after_images: set[Path] = set()
             for pattern in image_extensions:
                 after_images |= set(work_dir.rglob(pattern))
-            new_images = sorted(after_images - before_images, key=lambda p: p.stat().st_mtime)
+            new_images = sorted(
+                (p for p in after_images - before_images if p.stat().st_size > 0),
+                key=lambda p: p.stat().st_mtime,
+            )
             new_images = new_images[: max(1, context.image_gen_count)]
 
             for f in new_images:
@@ -934,6 +1018,10 @@ def run_generation(
                 dest = images_dir_path / f.name
                 shutil.copy2(f, dest)
                 generated_image_paths.append(dest)
+
+    if md_path.exists():
+        config.normalize_image_paths_in_md(md_path, work_dir)
+        _remove_missing_image_links(md_path)
 
     added_attached = 0
     if context.image_paths and md_path.exists():
@@ -945,6 +1033,15 @@ def run_generation(
 
     if md_path.exists():
         config.normalize_image_paths_in_md(md_path, work_dir)
+
+    if context.generate_images and not generated_image_paths:
+        error_path = output_dir_path / "image_generation_error.txt"
+        if not error_path.exists():
+            error_path.write_text(
+                f"이미지 파일 저장 확인 실패(rc={rc}): 새로 저장된 0바이트 초과 이미지가 없습니다. output/generation_trace.log를 확인하세요.",
+                encoding="utf-8",
+            )
+        logger.error("이미지 생성/저장 실패: %s", error_path.read_text(encoding="utf-8").strip())
 
     status = "success" if rc == 0 and md_path.exists() else "failed"
     logger.info(
@@ -1162,6 +1259,7 @@ def run_pipeline(
     context: PipelineContext,
     on_step: Callable[[str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    on_review: Callable[[Path], bool] | None = None,
 ) -> dict:
     """입력 수집 → (크롤링) → 이미지 복사 → AI 생성 → (이미지 생성+본문 삽입) → 발행 → 결과 기록을 순차 실행한다.
 
@@ -1229,6 +1327,11 @@ def run_pipeline(
     else:
         img_status = "skipped"
     result["steps"]["image_gen"] = {"status": img_status}
+    if img_status == "failed":
+        error_path = config.output_dir(work_dir) / "image_generation_error.txt"
+        reason = error_path.read_text(encoding="utf-8").strip() if error_path.exists() else "이미지 생성 후 작업 폴더에 저장된 이미지 파일이 없습니다. output/generation_trace.log를 확인하세요."
+        result["steps"]["image_gen"]["error"] = reason
+        logger.error("이미지 생성 실패: %s", reason)
     if on_step:
         on_step("image_gen", img_status)
 
@@ -1240,6 +1343,16 @@ def run_pipeline(
         on_step("image_search", search_status)
 
     if gen_status == "success":
+        if context.review_draft:
+            if on_step:
+                on_step("publish", "review")
+            approved = on_review(md_path) if on_review else False
+            if not approved or (cancel_event and cancel_event.is_set()):
+                result["steps"]["publish"] = {"status": "canceled"}
+                if on_step:
+                    on_step("publish", "canceled")
+                (work_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                return result
         if on_step:
             on_step("publish", "running")
         pub_status, warning = run_publish(

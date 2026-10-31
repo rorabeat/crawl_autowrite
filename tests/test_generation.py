@@ -6,6 +6,17 @@ import config
 import pipeline
 
 
+def test_latest_image_tool_request_preserves_low_quality_without_api_fallback():
+    context = pipeline.PipelineContext(keyword="여행", ai_model="codex:gpt-5.6-luna")
+    instruction = pipeline._build_inline_image_instruction(context, "codex")
+    assert "$imagegen" in instruction
+    assert "gpt-image-2.5-flare" in instruction
+    assert "low" in instruction
+    assert "gpt-image-1 " not in instruction
+    assert "별도 API 호출로 전환하지 마" in instruction
+    assert "gpt-image-2.5-flare" in pipeline._build_image_generation_prompt(context, "본문", None)
+
+
 def test_safe_title_removes_reserved_characters():
     assert config.safe_title('오키나와: "여행" <2박3일> *특가*') == "오키나와 여행 2박3일 특가"
 
@@ -398,7 +409,7 @@ def test_run_generation_passes_model_to_codex_backend(tmp_path, monkeypatch):
 
     assert "--model" in captured_args["args"]
     model_index = captured_args["args"].index("--model")
-    assert captured_args["args"][model_index + 1] == "gpt-5.6-sol"
+    assert captured_args["args"][model_index + 1] == "gpt-6.1-sol"
 
 
 def test_resolve_agents_md_content_uses_custom_path_when_set(tmp_path):
