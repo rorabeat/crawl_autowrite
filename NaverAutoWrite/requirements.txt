@@ -1,4 +1,4 @@
 playwright
+websocket-client>=1.9,<2
 python-dotenv
-pyperclip
 mistune

@@ -6,6 +6,7 @@ docs/PRD.md "기존 구성요소 계약"과 반드시 일치해야 한다(임의
 """
 
 import os
+import hashlib
 import sys
 import re
 from pathlib import Path
@@ -29,6 +30,13 @@ if getattr(sys, "frozen", False):
     _WORK_ROOT = Path(sys.executable).resolve().parent
 else:
     _WORK_ROOT = Path(__file__).resolve().parent
+
+if getattr(sys, "frozen", False):
+    # The GUI and every child use the browser shipped beside the executable.
+    _browser_root = _WORK_ROOT / "runtime" / "ms-playwright"
+    if not _browser_root.is_dir():
+        _browser_root = _WORK_ROOT / "Release" / "runtime" / "ms-playwright"
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(_browser_root)
 
 # ---------------------------------------------------------------------------
 # A. 크롤링 — NaverBlogCrawlingByPlayWright/blogcontentsClawring.py
@@ -279,33 +287,20 @@ def build_codex_exec_args(
 # 계약 원문: python main.py --md <md파일경로> [--blog-id <id>] [--headless] [--session-file <path>]
 # ---------------------------------------------------------------------------
 PUBLISHER_DIR = _WORK_ROOT / "NaverAutoWrite"
+PUBLISH_LOG_DIR = _WORK_ROOT / "log"
 PUBLISHER_SCRIPT = "main.py"
-PUBLISHER_ENV_VARS = ("NAVER_ID", "NAVER_PW", "NAVER_BLOG_ID", "NAVER_CATEGORY")
+PUBLISHER_ENV_VARS = ("NAVER_ID", "NAVER_BLOG_ID", "NAVER_CATEGORY")
 
-# 발행 서브프로세스 응답 대기 상한(초). NaverAutoWrite는 CAPTCHA/2FA 감지 시 최대 5분간
-# headed 브라우저에서 수동 인증을 기다리므로(NaverAutoWrite/CLAUDE.md 참조) 그보다
-# 충분히 여유를 둔다. login_mode="manual"(사용자가 직접 로그인)을 고르면 사람이 얼마나
-# 걸릴지 알 수 없으므로, 평소보다 느리게 로그인하는 경우 이 상한에 걸려 강제 종료될 수
-# 있다는 점을 감안한 값이다(20분).
-PUBLISH_TIMEOUT_SEC = 1_200
+# 사용자가 브라우저에서 로그인할 때까지 기다린다. 작업 취소는 별도로 처리한다.
+PUBLISH_TIMEOUT_SEC = None
 
 
 # ---------------------------------------------------------------------------
-# 다중 네이버 계정 (사용자 요청: 여러 계정으로 블로그 글을 발행). accounts.json에 계정
-# 목록을 저장하고(평문, 로컬 전용 — .gitignore 등록됨), 태스크마다 어느 계정으로 발행할지
-# account_id로 지정한다(pipeline.TaskItem/PipelineContext 참조). NaverAutoWrite 자체는
-# .env 하나에서만 자격증명을 읽지만(변경 금지 대상), python-dotenv의 load_dotenv()가 이미
-# 설정된 환경변수를 덮어쓰지 않는 점을 이용해 서브프로세스 실행 시 env로 자격증명을
-# 주입한다(build_publisher_env 참조) — NaverAutoWrite 코드/CLI 계약은 그대로 둔다.
-# 오케스트레이터(pipeline.py)는 항상 accounts.json에서 계정을 찾아 env로 주입하며(계정이
-# 하나도 없으면 발행 자체를 실패 처리), NaverAutoWrite/.env는 더 이상 자격증명 출처로 쓰지
-# 않는다 — 이 저장소 안에서는 accounts.json만 사용한다(사용자 요청).
+# 비밀이 아닌 계정 식별 정보만 저장한다. 로그인 상태는 별도 브라우저 프로필에 보관한다.
 # ---------------------------------------------------------------------------
-ACCOUNTS_JSON_PATH = _WORK_ROOT / "accounts.json"
+ACCOUNT_PROFILES_JSON_PATH = _WORK_ROOT / "account_profiles.json"
 
-# 마지막으로 발행에 사용한 계정을 기록해, 계정이 바뀌는 경계에서만 크롬을 재시작하도록
-# 판단하는 근거로 쓴다(naver_login.py의 CDP 포트 9333 고정 재사용 때문 — 계정이 다르면
-# 프로필을 새로 지정해도 이미 떠 있는 이전 계정 크롬에 그대로 붙어버림).
+# 마지막으로 사용한 계정을 새 작업의 기본 선택으로 유지한다.
 LAST_ACCOUNT_JSON_PATH = _WORK_ROOT / "last_account.json"
 
 
@@ -313,37 +308,46 @@ class Account(TypedDict):
     id: str
     label: str
     naver_id: str
-    naver_pw: str
     blog_id: str
     category: str
 
 
 def publisher_session_file(account_id: str) -> Path:
-    """계정별로 분리된 크롬 프로필(세션) 경로를 만든다.
-
-    NaverAutoWrite/naver_login.py의 create_browser_context는 --session-file의 부모
-    폴더를 그대로 Chrome user-data-dir로 재사용하므로, 계정마다 다른 폴더를 주면 계정별로
-    로그인 세션(쿠키)이 분리된다. NaverAutoWrite/.gitignore가 이미 `.naver_session/`을
-    제외하고 있으므로 그 하위에 계정 ID로 폴더를 나눈다.
-    """
-    return PUBLISHER_DIR / ".naver_session" / account_id / "storage_state.json"
+    """Isolate new profiles and retain existing account profiles without copying them."""
+    if not isinstance(account_id, str) or not account_id:
+        raise ValueError("계정 ID가 유효하지 않습니다.")
+    digest = hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+    root = _WORK_ROOT / "data" / "login_sessions"
+    new_dir = root / digest
+    def reject_links(path: Path) -> None:
+        for part in (path, *path.parents):
+            if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+                raise ValueError("세션 경로에 링크 또는 junction이 있습니다.")
+    reject_links(new_dir)
+    if not new_dir.resolve().is_relative_to(root.absolute()):
+        raise ValueError("세션 경로의 소유권을 확인할 수 없습니다.")
+    # Legacy directory names are accepted only as a single safe path component.
+    # Never inspect or copy a profile while its browser may still be running.
+    safe_legacy = bool(re.fullmatch(r"[A-Za-z0-9_-]+", account_id))
+    legacy_dir = PUBLISHER_DIR / ".naver_session" / account_id if safe_legacy else None
+    if legacy_dir is not None:
+        reject_links(legacy_dir)
+    if legacy_dir is not None and legacy_dir.is_symlink():
+        raise ValueError("기존 세션 경로의 소유권을 확인할 수 없습니다.")
+    legacy_exists = legacy_dir is not None and legacy_dir.exists()
+    if legacy_exists and new_dir.exists():
+        raise ValueError("기존 세션과 새 세션이 모두 존재합니다. 세션 충돌을 확인하세요.")
+    return (legacy_dir if legacy_exists else new_dir) / "storage_state.json"
 
 
 def build_publisher_env(account: "Account | None") -> dict[str, str] | None:
-    """계정별 자격증명을 담은 서브프로세스 환경변수 dict를 만든다.
-
-    호출부(run_publish/run_prelogin)는 항상 accounts.json에서 찾은 계정을 넘기며, 계정을
-    하나도 못 찾으면 발행 자체를 실패 처리하므로 account가 None으로 들어오는 경우는 없다.
-    account가 주어지면 os.environ을 복사한 뒤 NAVER_ID/NAVER_PW/NAVER_BLOG_ID/
-    NAVER_CATEGORY만 그 계정 값으로 덮어쓴다. NaverAutoWrite/config.py의 load_dotenv()는
-    이미 설정된 환경변수를 덮어쓰지 않으므로(python-dotenv 기본 동작), 이 값이 (남아 있다면)
-    .env보다 우선 적용된다 — NaverAutoWrite 코드는 전혀 건드리지 않는다.
-    """
-    if account is None:
-        return None
+    """계정 확인과 발행에 필요한 값만 서브프로세스 환경에 전달한다."""
     env = dict(os.environ)
+    env.pop("NAVER_PW", None)
+    if account is None:
+        return env
     env["NAVER_ID"] = account["naver_id"]
-    env["NAVER_PW"] = account["naver_pw"]
+    env.pop("NAVER_PW", None)
     env["NAVER_BLOG_ID"] = account["blog_id"]
     if account.get("category"):
         env["NAVER_CATEGORY"] = account["category"]
@@ -357,15 +361,13 @@ def build_publisher_args(
     blog_id: str | None = None,
     headless: bool = False,
     session_file: Path | None = None,
-    login_mode: str = "auto",
 ) -> list[str]:
     """publisher 서브프로세스 인자 리스트를 만든다. md_path는 절대경로여야 한다.
 
     (docs/PRD.md 7절 치명적 리스크 C-1: image_uploader.py가 CWD 기준 상대경로를 해석하므로
     md 내 이미지 경로뿐 아니라 --md 인자 자체도 절대경로로 전달한다.)
 
-    login_mode="auto"(기본값)는 저장된 계정으로 자동 로그인을 시도하고, "manual"은
-    자동 입력 없이 사람이 직접 로그인부터 진행한다(NaverAutoWrite/main.py --login-mode).
+    로그인은 항상 사용자가 브라우저에서 직접 수행한다.
     """
     args = [PUBLISHER_SCRIPT, "--md", str(md_path)]
     if blog_id:
@@ -374,22 +376,32 @@ def build_publisher_args(
         args.append("--headless")
     if session_file:
         args += ["--session-file", str(session_file)]
-    args += ["--login-mode", login_mode]
     return args
 
 
 PRELOGIN_SCRIPT = "prelogin.py"
 
 
+def publish_profile() -> Path:
+    """Single installed-Chrome profile; never migrate account profiles implicitly."""
+    return (PUBLISHER_DIR.parent / "data" / "chrome-publish-profile").resolve()
+
+
+def publish_session_env() -> dict[str, str]:
+    env = build_publisher_env(None)
+    env.update({"NAVER_MANUAL_PROFILE": "1", "NAVER_CHROME_PROFILE": str(publish_profile()),
+                "NAVER_ID": "", "NAVER_BLOG_ID": "", "NAVER_CATEGORY": ""})
+    return env
+
+
 def build_prelogin_args(
     blog_id: str | None = None,
     headless: bool = False,
     session_file: Path | None = None,
-    login_mode: str = "auto",
 ) -> list[str]:
     """미리 로그인만 수행하는 prelogin.py 서브프로세스 인자 리스트를 만든다.
 
-    build_publisher_args와 같은 계정별 인자(blog_id/session_file/login_mode)를
+    build_publisher_args와 같은 계정별 인자(blog_id/session_file)를
     그대로 받되 --md는 없다(사용자 요청: 태스크 시작과 동시에 크롬을 미리 띄워
     크롤링/AI 생성이 진행되는 동안 로그인을 마칠 수 있게 함, run_prelogin 참조).
     """
@@ -400,7 +412,6 @@ def build_prelogin_args(
         args.append("--headless")
     if session_file:
         args += ["--session-file", str(session_file)]
-    args += ["--login-mode", login_mode]
     return args
 
 
@@ -418,8 +429,8 @@ class InterpreterConfig(TypedDict):
 
 
 DEFAULT_INTERPRETER_CONFIG: InterpreterConfig = {
-    "crawler": "python",
-    "publisher": "python",
+    "crawler": str((_WORK_ROOT / "runtime" / "python" / "python.exe") if (_WORK_ROOT / "runtime" / "python" / "python.exe").is_file() else (_WORK_ROOT / "Release" / "runtime" / "python" / "python.exe")) if getattr(sys, "frozen", False) else sys.executable,
+    "publisher": str((_WORK_ROOT / "runtime" / "python" / "python.exe") if (_WORK_ROOT / "runtime" / "python" / "python.exe").is_file() else (_WORK_ROOT / "Release" / "runtime" / "python" / "python.exe")) if getattr(sys, "frozen", False) else sys.executable,
 }
 
 

@@ -14,15 +14,16 @@ from urllib.parse import urlencode
 
 import requests
 
+import config
 import image_fetch
 
 logger = logging.getLogger(__name__)
 
-_ENV_PATH = Path(__file__).resolve().parent / ".env"
+_ENV_PATH = config._WORK_ROOT / "GetImage" / ".env"
 _SERVICE_KEY_NAME = "DATA_GO_KR"
 _SEARCH_URL = "https://apis.data.go.kr/B551011/KorService2/searchKeyword2"
 _REQUEST_TIMEOUT_SEC = 10
-_CACHE_DIR = Path(__file__).resolve().parent / "_cache"
+_CACHE_DIR = config._WORK_ROOT / "GetImage" / "_cache"
 
 
 def _load_service_key() -> str:

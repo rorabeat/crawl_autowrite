@@ -21,3 +21,10 @@ pyinstaller>=6.21.0
 
 # 참고: NaverBlogCrawlingByPlayWright/, NaverAutoWrite/ 는 각각 독립된 의존성/venv를 가지며
 # 오케스트레이터는 이들을 subprocess로만 호출한다(직접 import하지 않으므로 여기 포함하지 않음).
+
+# 쇼핑 커넥트 전용 브라우저
+playwright>=1.40.0
+websocket-client>=1.9,<2
+
+# 수동 발행 본문 미리보기
+Markdown>=3.10

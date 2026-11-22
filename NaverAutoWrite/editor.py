@@ -8,13 +8,20 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
+
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from image_uploader import upload_image
 from md_parser import ParsedMarkdown
-from naver_login import DEFAULT_TIMEOUT_MS, wait_for_selector
+from naver_login import DEFAULT_TIMEOUT_MS
+from table_parser import MarkdownTable, split_body_blocks
 
 WRITE_URL_TEMPLATE = "https://blog.naver.com/{blog_id}?Redirect=Write&"
 OPTIONAL_POPUP_SELECTORS = (".se-popup-button-cancel", ".se-help-panel-close-button")
@@ -99,6 +106,7 @@ LINK_URL_INPUT_SELECTOR = "input.se-popup-oglink-input"
 LINK_SEARCH_BUTTON_SELECTOR = "button.se-popup-oglink-button"
 LINK_CONFIRM_BUTTON_SELECTOR = "button.se-popup-button-confirm"
 LINK_POPUP_CLOSE_BUTTON_SELECTOR = "button.se-popup-close-button"
+LINK_CARD_SELECTOR = ".se-component.se-oglink"
 
 # 하이라이트 처리: 본문 줄 안에 `**문구**`(마크다운 굵게 문법 재활용)로 감싼 구간을
 # 가독성을 위한 배경색 강조 대상으로 본다. `**`는 항상 화면에서 벗겨내고(문자 그대로
@@ -162,6 +170,433 @@ class EditorError(Exception):
     """에디터 진입/조작 중 복구 불가능한 오류가 발생했을 때 발생한다."""
 
 
+TABLE_BUTTON_SELECTOR = 'button[data-group="documentToolbar"][data-name="table"]'
+TABLE_COMPONENT_SELECTOR = '.se-component.se-table'
+TABLE_ROWS_SELECTOR = 'table.se-table-content > tbody > tr'
+TABLE_CELL_SELECTOR = 'td.se-cell'
+TABLE_CONTROLS = {
+    'row': '.se-cell-controlbar-row',
+    'column': '.se-cell-controlbar-column',
+}
+TABLE_TIMEOUT_MS = 5_000
+
+
+def _editor_error_detail(exc: Exception) -> str:
+    """Describe known editor failures without copying Playwright DOM or URLs."""
+    kind = type(exc).__name__
+    if isinstance(exc, EditorError):
+        return f'예외={kind}, 원인={exc}'
+    if isinstance(exc, PlaywrightError):
+        message = str(exc)
+        for marker, reason in (
+            ('strict mode violation', '여러 요소가 같은 선택자에 일치'),
+            ('intercepts pointer events', '다른 요소가 마우스 조작을 가림'),
+            ('not enabled', '버튼 비활성'),
+            ('not visible', '요소가 보이지 않음'),
+            ('not editable', '입력 영역이 편집 불가'),
+            ('detached', '에디터에서 대상 요소가 분리됨'),
+            ('Target page, context or browser has been closed', '탭 또는 Chrome 연결 종료'),
+        ):
+            if marker in message:
+                return f'예외={kind}, 원인={reason}'
+    return f'예외={kind}'
+
+
+def _table_shape(table: Any) -> tuple[int, int]:
+    counts = table.locator(TABLE_ROWS_SELECTOR).evaluate_all(
+        '(rows, selector) => rows.map(row => row.querySelectorAll(selector).length)',
+        TABLE_CELL_SELECTOR,
+    )
+    if not counts or not counts[0] or any(count != counts[0] for count in counts):
+        raise EditorError(f'표의 행과 열을 확인할 수 없습니다 (행별 셀 개수={counts}).')
+    return len(counts), counts[0]
+
+
+def _wait_table_shape(table: Any, expected: tuple[int, int], page: Any) -> None:
+    deadline = monotonic() + TABLE_TIMEOUT_MS / 1000
+    while True:
+        try:
+            shape = _table_shape(table)
+            if shape == expected:
+                return
+            observed = f'{shape[0]}행 {shape[1]}열'
+        except EditorError as exc:
+            observed = str(exc)
+        if monotonic() >= deadline:
+            break
+        page.wait_for_timeout(200)
+    raise EditorError(f'표 크기 변경 후 목표={expected[0]}행 {expected[1]}열, 관측={observed}')
+
+
+def _table_control(frame: Any, table: Any, axis: str) -> Any:
+    # SmartEditor can render controls as siblings/overlays of the table.
+    selector = TABLE_CONTROLS[axis] + ':visible'
+    local = table.locator(selector)
+    return local if local.count() else frame.locator(selector)
+
+
+def _click_table_control(button: Any) -> None:
+    """Use a native click on an exposed point, avoiding overlapping resize handles."""
+    button.scroll_into_view_if_needed(timeout=TABLE_TIMEOUT_MS)
+    point = button.evaluate("""e => {
+        const r = e.getBoundingClientRect();
+        for (const y of [.5, .15, .85]) for (const x of [.5, .15, .85]) {
+            const px = r.width*x - e.clientLeft, py = r.height*y - e.clientTop;
+            if (px < 0 || py < 0) continue;
+            const hit = document.elementFromPoint(r.x + r.width*x, r.y + r.height*y);
+            if (hit && (hit === e || e.contains(hit))) return {x:px,y:py};
+        }
+        return null;
+    }""")
+    if point is None:
+        raise EditorError('표 조절 버튼이 크기 조절 핸들에 가려져 있습니다.')
+    button.click(position=point, timeout=TABLE_TIMEOUT_MS)
+
+
+def _resize_native_table(frame: Any, table: Any, target: tuple[int, int], page: Any) -> None:
+    for axis, index in (('row', 0), ('column', 1)):
+        shape = _table_shape(table)
+        while shape[index] != target[index]:
+            action = '추가' if shape[index] < target[index] else '삭제'
+            print(f'진단: 표 크기 조절 - 현재 {shape[0]}행 {shape[1]}열, 목표 {target[0]}행 {target[1]}열, 축={axis}, 동작={action}', flush=True)
+            table.locator(TABLE_CELL_SELECTOR).first.click(timeout=TABLE_TIMEOUT_MS)
+            control = _table_control(frame, table, axis)
+            expected = list(shape)
+            if shape[index] < target[index]:
+                control.locator('button.se-cell-add-button:visible').last.click(timeout=TABLE_TIMEOUT_MS)
+                expected[index] += 1
+            else:
+                _click_table_control(control.locator('button.se-cell-select-button:visible').last)
+                # The context menu is an editor overlay, not necessarily a table child.
+                frame.locator('button.se-context-menu-button-delete:visible').click(timeout=TABLE_TIMEOUT_MS)
+                expected[index] -= 1
+            _wait_table_shape(table, tuple(expected), page)
+            shape = tuple(expected)
+
+
+def _equalize_table_columns(frame: Any, table: Any) -> None:
+    table.locator(TABLE_CELL_SELECTOR).first.click(timeout=TABLE_TIMEOUT_MS)
+    control = _table_control(frame, table, 'row')
+    select_all = table.locator('button.se-cell-select-all-button:visible')
+    if select_all.count():
+        _click_table_control(select_all)
+    else:
+        _click_table_control(control.locator('button.se-cell-select-button:visible').first)
+    frame.locator('button.se-context-menu-button-equal-width:visible').click(timeout=TABLE_TIMEOUT_MS)
+    frame.owner.page.keyboard.press('Escape')
+
+
+def _table_column_fractions(rows: list[list[str]]) -> list[float]:
+    """Allocate bounded widths; long outliers cannot consume the whole table."""
+    count = len(rows[0])
+    if count == 1:
+        return [1.0]
+    scores = []
+    for column in range(count):
+        lengths = sorted(sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else
+                             .35 if c.isspace() else 1 for c in row[column]) for row in rows)
+        typical = lengths[int((len(lengths) - 1) * .75)]
+        scores.append(max(8, min(80, .75 * typical + .25 * lengths[-1])) ** .65)
+    lower, upper = .5 / count, min(.75, 2 / count)
+    fractions = [0.0] * count
+    remaining = set(range(count))
+    budget = 1.0
+    while remaining:
+        weight = sum(scores[i] for i in remaining)
+        proposals = {i: budget * scores[i] / weight for i in remaining}
+        bounded = {i: max(lower, min(upper, v)) for i, v in proposals.items()
+                   if v < lower or v > upper}
+        if not bounded:
+            for i, v in proposals.items():
+                fractions[i] = v
+            break
+        for i, value in bounded.items():
+            fractions[i] = value
+            budget -= value
+            remaining.remove(i)
+    return fractions
+
+
+def _drag_table_boundary(frame: Any, table: Any, row: int, column: int,
+                         axis: str, delta: float) -> None:
+    page = frame.owner.page
+    cell = table.locator(TABLE_ROWS_SELECTOR).nth(row).locator(TABLE_CELL_SELECTOR).nth(column)
+    cell.scroll_into_view_if_needed(timeout=TABLE_TIMEOUT_MS)
+    # Enter the cell so sticky toolbars cannot cover the intended drag row.
+    cell.locator('.se-text-paragraph').first.dblclick(timeout=TABLE_TIMEOUT_MS)
+    box = cell.bounding_box()
+    if box is None:
+        raise EditorError('표 크기 조절 위치를 확인하지 못했습니다.')
+    x = box['x'] + (box['width'] - 1 if axis == 'width' else box['width'] / 2)
+    y = box['y'] + (box['height'] / 2 if axis == 'width' else box['height'] - 1)
+    page.mouse.move(x, y)
+    page.wait_for_timeout(100)
+    handle = table.locator(f'.se-cell-size-controlbar-{axis} button.se-cell-size-button')
+    handle.wait_for(state='visible', timeout=TABLE_TIMEOUT_MS)
+    bounds = handle.bounding_box()
+    if bounds is None:
+        raise EditorError('표 크기 조절 핸들을 확인하지 못했습니다.')
+    if axis == 'width':
+        x = bounds['x'] + bounds['width'] / 2
+        y = max(bounds['y'] + 2, min(y, bounds['y'] + bounds['height'] - 2))
+        if abs(x - (box['x'] + box['width'])) > 20:
+            raise EditorError('선택한 열의 너비 조절 핸들이 아닙니다.')
+    else:
+        y = bounds['y'] + bounds['height'] / 2
+        x = max(bounds['x'] + 2, min(x, bounds['x'] + bounds['width'] - 2))
+        if abs(y - (box['y'] + box['height'])) > 20:
+            raise EditorError('선택한 행의 높이 조절 핸들이 아닙니다.')
+    position = {'x': x - bounds['x'], 'y': y - bounds['y']}
+    # Unlike a raw mouse move, hover verifies that no floating toolbar covers
+    # the resize handle and resolves its position again after any scrolling.
+    handle.hover(position=position, timeout=TABLE_TIMEOUT_MS)
+    bounds = handle.bounding_box()
+    if bounds is None:
+        raise EditorError('표 조절 핸들의 이동 후 위치를 확인하지 못했습니다.')
+    x, y = bounds['x'] + position['x'], bounds['y'] + position['y']
+    page.mouse.down()
+    try:
+        page.wait_for_timeout(80)
+        page.mouse.move(x + (delta if axis == 'width' else 0),
+                        y + (delta if axis == 'height' else 0), steps=12)
+    finally:
+        page.mouse.up()
+    page.wait_for_timeout(150)
+
+
+def _fit_table_columns(frame: Any, table: Any, rows: list[list[str]]) -> None:
+    fractions = _table_column_fractions(rows)
+    if len(fractions) == 1:
+        return
+    def widths():
+        return table.locator(TABLE_ROWS_SELECTOR).first.locator(TABLE_CELL_SELECTOR).evaluate_all(
+            'cells => cells.map(c => c.getBoundingClientRect().width)')
+    initial = widths()
+    if len(initial) != len(fractions) or any(width <= 0 for width in initial):
+        raise EditorError(f'열 너비 조절 전 치수 확인 실패 (관측 너비={[round(v, 1) for v in initial]}px).')
+    total = sum(initial)
+    targets = [total * sum(fractions[:i + 1]) for i in range(len(fractions) - 1)]
+    for attempt in range(3):
+        current = widths()
+        deltas = [target - sum(current[:i + 1]) for i, target in enumerate(targets)]
+        if max(abs(d) for d in deltas) <= 3:
+            break
+        # Free space before expanding a neighbouring column.
+        order = sorted(range(len(deltas)), key=lambda i: (deltas[i] >= 0, -i))
+        for i in order:
+            delta = targets[i] - sum(widths()[:i + 1])
+            if abs(delta) > 3:
+                row = min(attempt, len(rows) - 1)
+                try:
+                    _drag_table_boundary(frame, table, row, i, 'width', delta)
+                except (EditorError, PlaywrightTimeoutError) as exc:
+                    print(f'진단: 열 너비 조절 실패 - 시도={attempt + 1}/3, 열={i + 1}, 행={row + 1}, '
+                          f'이동={delta:.1f}px, {_editor_error_detail(exc)}', flush=True)
+    actual = widths()
+    if len(actual) != len(fractions) or min(actual) <= 0 or abs(sum(actual) - total) > 3:
+        raise EditorError(f'열 너비 조절 후 치수 확인 실패 (조절 전 전체 너비={total:.1f}px, '
+                          f'관측 너비={[round(v, 1) for v in actual]}px).')
+    if any(abs(sum(actual[:i + 1]) - t) > 4 for i, t in enumerate(targets)):
+        print(f'진단: 표 경고 - 열 너비 목표 미달, 현재={[round(v, 1) for v in actual]}, 목표 경계={[round(v, 1) for v in targets]}', flush=True)
+        print('진단: 현재 열 너비를 유지하고 셀 잘림을 검사합니다.', flush=True)
+    print('진단: 적용된 열 너비 비율=' + '/'.join(str(round(v / total * 100)) for v in actual), flush=True)
+
+
+def _style_table_header(frame: Any, table: Any) -> None:
+    table.locator(TABLE_CELL_SELECTOR).first.click(timeout=TABLE_TIMEOUT_MS)
+    control = _table_control(frame, table, 'row')
+    _click_table_control(control.locator('button.se-cell-select-button').first)
+    frame.locator('button[data-name="cell-background-color"]:visible').click(timeout=TABLE_TIMEOUT_MS)
+    # The same color can appear both in recent colors and the standard palette.
+    frame.locator('button.se-color-palette[title="#e2e2e2"]:visible').first.click(timeout=TABLE_TIMEOUT_MS)
+    frame.owner.page.keyboard.press('Escape')
+    colors = table.locator(TABLE_ROWS_SELECTOR).evaluate_all(
+        'rows => rows.map(r => [...r.cells].map(c => getComputedStyle(c).backgroundColor))')
+    if not colors or any(c != 'rgb(226, 226, 226)' for c in colors[0]):
+        raise EditorError('첫 행의 밝은 회색 배경을 확인하지 못했습니다.')
+    if any(c == 'rgb(226, 226, 226)' for row in colors[1:] for c in row):
+        raise EditorError('제목행 외의 셀에도 회색 배경이 적용되었습니다.')
+
+
+def _fit_table_row_heights(frame: Any, table: Any) -> None:
+    clipped = table.locator(TABLE_CELL_SELECTOR).evaluate_all('''cells => {
+        const c = cells.find(cell => cell.scrollWidth > cell.clientWidth + 2);
+        return c ? [c.parentElement.sectionRowIndex + 1, c.cellIndex + 1, c.scrollWidth - c.clientWidth] : null;
+    }''')
+    if clipped:
+        row, column, overflow = clipped
+        raise EditorError(f'표 셀 가로 잘림 (행={row}, 열={column}, 넘침={overflow}px).')
+    rows = table.locator(TABLE_ROWS_SELECTOR)
+    for index in range(rows.count()):
+        for attempt in range(2):
+            overflow = rows.nth(index).locator(TABLE_CELL_SELECTOR).evaluate_all('''cells => Math.max(0, ...cells.map(c => {
+                const box = c.getBoundingClientRect();
+                const content = c.querySelector('.se-module-text') || c.querySelector('.se-text-paragraph');
+                return Math.max(c.scrollHeight-c.clientHeight-1, content ? content.getBoundingClientRect().bottom-box.bottom+5 : 0);
+            }))''')
+            if overflow <= 1:
+                break
+            if attempt:
+                raise EditorError(f'표 {index + 1}행의 세로 잘림을 해소하지 못했습니다 (넘침={overflow:.1f}px).')
+            print(f'진단: 표 행 높이 조절 - 행={index + 1}, 넘침={overflow:.1f}px', flush=True)
+            _drag_table_boundary(frame, table, index, 0, 'height', overflow + 4)
+
+
+def _close_table_sidebar(frame: Any) -> None:
+    """Close the editor's optional side panel before it covers table menus."""
+    sidebar = frame.locator('.se-sidebar:visible')
+    if sidebar.count():
+        panel = sidebar.first
+        panel.locator('button.se-sidebar-close-button').click(timeout=TABLE_TIMEOUT_MS)
+        panel.wait_for(state='hidden', timeout=TABLE_TIMEOUT_MS)
+        print('진단: 표 메뉴를 가리는 오른쪽 편집 패널 닫음', flush=True)
+
+
+def _normalized_cell_text(value: str) -> str:
+    return value.replace('\u200b', '').replace('\u00a0', ' ').strip()
+
+
+def _verify_table_cells(table: Any, expected: list[list[str]]) -> None:
+    actual = table.locator(TABLE_ROWS_SELECTOR).evaluate_all(
+        '(rows, selector) => rows.map(row => [...row.querySelectorAll(selector)].map(cell => cell.innerText))',
+        TABLE_CELL_SELECTOR,
+    )
+    counts = [len(row) for row in actual]
+    if len(actual) != len(expected) or any(count != len(expected[0]) for count in counts):
+        raise EditorError(f'최종 행·열 불일치 (관측 행={len(actual)}, 행별 셀 개수={counts}).')
+    for row, (expected_row, actual_row) in enumerate(zip(expected, actual), 1):
+        for column, (value, observed) in enumerate(zip(expected_row, actual_row), 1):
+            value, observed = _normalized_cell_text(value), _normalized_cell_text(observed)
+            if observed != value:
+                raise EditorError(f'최종 셀 내용 불일치 (행={row}, 열={column}, '
+                                  f'예상={len(value)}자, 관측={len(observed)}자).')
+
+
+def _insert_native_table(frame: Any, block: MarkdownTable) -> None:
+    """Insert a native editor table, failing before draft save if it cannot be verified."""
+    page = frame.owner.page
+    tables = frame.locator(TABLE_COMPONENT_SELECTOR)
+    table_number = 1
+    stage = '기존 표 확인'
+    target = (len(block.rows), len(block.rows[0]))
+    started = monotonic()
+    table = None
+    completed_cells = 0
+    try:
+        table_count = tables.count()
+        table_number = table_count + 1
+        previous = tables.last.element_handle(timeout=TABLE_TIMEOUT_MS) if table_count else None
+        print(f'진행 상황: 표 {table_number} 입력 시작 - {target[0]}행 {target[1]}열', flush=True)
+        stage = '표 작업 공간 확보'
+        _close_table_sidebar(frame)
+        stage = '표 버튼 클릭'
+        frame.locator(TABLE_BUTTON_SELECTOR).first.click(timeout=TABLE_TIMEOUT_MS)
+        stage = '표 생성 확인'
+        table = tables.nth(table_count)
+        table.wait_for(state='visible', timeout=TABLE_TIMEOUT_MS)
+        if previous is not None and not table.evaluate("""(candidate, previous) =>
+            previous.isConnected && !!(previous.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)
+        """, previous, timeout=TABLE_TIMEOUT_MS):
+            raise EditorError('새 표가 기존 마지막 표 뒤에 만들어졌는지 확인하지 못했습니다.')
+        # Read the actual default size instead of assuming a fixed 3x3 table.
+        stage = '초기 행·열 확인'
+        deadline = monotonic() + TABLE_TIMEOUT_MS / 1000
+        while True:
+            try:
+                initial = _table_shape(table)
+                break
+            except EditorError:
+                if monotonic() >= deadline:
+                    raise
+                page.wait_for_timeout(200)
+        print(f'진단: 표 {table_number} 초기 크기 - {initial[0]}행 {initial[1]}열', flush=True)
+        stage = '행·열 조절'
+        _resize_native_table(frame, table, target, page)
+        stage = '열 너비 맞춤'
+        if target[1] > 1:
+            _equalize_table_columns(frame, table)
+        stage = '셀 입력'
+        rows = table.locator(TABLE_ROWS_SELECTOR)
+        for row_index, values in enumerate(block.rows):
+            cells = rows.nth(row_index).locator(TABLE_CELL_SELECTOR)
+            for column_index, value in enumerate(values):
+                stage = f'셀 입력 ({row_index + 1}행 {column_index + 1}열)'
+                if value:
+                    cell = cells.nth(column_index)
+                    paragraph = cell.locator('.se-text-paragraph').first
+                    # A single click can leave SmartEditor's cell-range selection
+                    # active after resizing. Double click enters text editing.
+                    for attempt in range(2):
+                        paragraph.dblclick(timeout=TABLE_TIMEOUT_MS)
+                        if cell.evaluate("""cell => {
+                            const anchor = cell.ownerDocument.getSelection()?.anchorNode;
+                            return !!anchor && cell.contains(anchor) &&
+                                (anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement).isContentEditable;
+                        }""", timeout=TABLE_TIMEOUT_MS):
+                            break
+                        print(f'진단: 표 셀 편집 위치 확인 실패 - 행={row_index + 1}, 열={column_index + 1}, '
+                              f'시도={attempt + 1}/2', flush=True)
+                    else:
+                        raise EditorError('입력 커서가 대상 셀의 편집 영역에 들어가지 않았습니다.')
+                    page.keyboard.insert_text(value)
+                    expected = _normalized_cell_text(value)
+                    deadline = monotonic() + TABLE_TIMEOUT_MS / 1000
+                    while True:
+                        actual = _normalized_cell_text(cell.inner_text(timeout=TABLE_TIMEOUT_MS))
+                        if actual == expected:
+                            break
+                        if monotonic() >= deadline:
+                            raise EditorError(f'입력 직후 셀 내용 불일치 (예상={len(expected)}자, 관측={len(actual)}자).')
+                        page.wait_for_timeout(200)
+                completed_cells += 1
+        stage = '내용별 열 너비 조절'
+        _fit_table_columns(frame, table, block.rows)
+        stage = '제목행 밝은 회색 적용'
+        _style_table_header(frame, table)
+        stage = '행 높이 확인'
+        _fit_table_row_heights(frame, table)
+        stage = '표 뒤 본문 이동'
+        # Prefer the body block created after a table; otherwise request one by
+        # clicking below the table before looking for it again.
+        for attempt in range(25):
+            is_after = table.evaluate("""table => {
+                const sections = document.querySelectorAll('.se-section-text');
+                const last = sections[sections.length - 1];
+                return !!last && !!(table.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING);
+            }""")
+            if is_after:
+                break
+            if attempt == 0:
+                bottom = frame.locator('button.se-canvas-bottom-button:visible')
+                if bottom.count():
+                    bottom.last.click(timeout=TABLE_TIMEOUT_MS)
+                    continue
+                table.scroll_into_view_if_needed(timeout=TABLE_TIMEOUT_MS)
+                box = table.bounding_box()
+                if box is None:
+                    raise EditorError('표 뒤에 입력할 위치를 찾을 수 없습니다.')
+                page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] + 15)
+            page.wait_for_timeout(200)
+        else:
+            raise EditorError('표 뒤의 본문 위치를 확인하지 못했습니다.')
+        _current_text_section(frame).click(timeout=TABLE_TIMEOUT_MS)
+        stage = '최종 셀 검증'
+        _verify_table_cells(table, block.rows)
+        print(f'진행 상황: 표 {table_number} 입력 완료 - {target[0]}행 {target[1]}열', flush=True)
+    except Exception as exc:
+        elapsed = monotonic() - started
+        print(f'진단: 표 {table_number} 실패 - 단계={stage}, 목표={target[0]}행 {target[1]}열, '
+              f'처리한 셀={completed_cells}/{target[0] * target[1]}, 경과={elapsed:.2f}초, '
+              f'{_editor_error_detail(exc)}', flush=True)
+        if table is not None and not page.is_closed():
+            try:
+                rows, columns = _table_shape(table)
+                print(f'진단: 실패 시 표 {table_number} 위치의 크기={rows}행 {columns}열', flush=True)
+            except (EditorError, PlaywrightError) as state_error:
+                print(f'진단: 실패 시 표 구조 조회 - {_editor_error_detail(state_error)}', flush=True)
+        raise EditorError(f'표 {table_number} 작성 실패: {stage} ({target[0]}행 {target[1]}열). 작성 중인 탭을 확인하세요.') from exc
+
+
 def _dismiss_optional_popups(frame: Any) -> None:
     """존재하는 경우에만 팝업/헬프패널을 닫는다 (F012). 없으면 조용히 넘어간다."""
     for selector in OPTIONAL_POPUP_SELECTORS:
@@ -190,12 +625,19 @@ def open_editor(page: Any, blog_id: str) -> Any:
     (F012) "작성 중인 글이 있습니다" 팝업은 취소로 닫고(새 글쓰기 진행),
     .se-popup-button-cancel, .se-help-panel-close-button 존재 시에만 클릭.
     """
-    page.goto(WRITE_URL_TEMPLATE.format(blog_id=blog_id))
+    if blog_id:
+        page.goto(WRITE_URL_TEMPLATE.format(blog_id=blog_id))
+    else:
+        # Naver resolves MyBlog.naver to the signed-in user's blog.
+        page.goto("https://blog.naver.com/MyBlog.naver?Redirect=Write&")
+        parsed = urlparse(page.url)
+        if parsed.scheme != "https" or parsed.hostname != "blog.naver.com":
+            raise EditorError("로그인한 사용자의 블로그를 확인하지 못했습니다.")
 
     try:
-        wait_for_selector(page, "#mainFrame")
+        page.wait_for_selector("#mainFrame", timeout=DEFAULT_TIMEOUT_MS)
     except Exception as exc:
-        raise EditorError(f"#mainFrame을 찾을 수 없습니다 (blog_id={blog_id}).") from exc
+        raise EditorError("글쓰기 에디터의 #mainFrame을 찾을 수 없습니다.") from exc
 
     frame = page.frame_locator("#mainFrame")
     _dismiss_draft_recovery_popup(frame)
@@ -208,6 +650,17 @@ def input_title(frame: Any, title: str) -> None:
     title_locator = frame.locator(".se-section-documentTitle")
     title_locator.click()
     title_locator.type(title, delay=TYPE_DELAY_MS)
+
+
+@contextmanager
+def _body_step(operation: str):
+    started = monotonic()
+    try:
+        yield
+    except PlaywrightTimeoutError as exc:
+        print(f'진단: 본문 세부 단계 실패 - 단계={operation}, 경과={monotonic() - started:.2f}초, '
+              f'{_editor_error_detail(exc)}', flush=True)
+        raise EditorError(f'본문 입력 시간 초과 ({operation})') from exc
 
 
 def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
@@ -270,7 +723,8 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     요소가 2개 이상 존재하게 되고, 캐시해둔 locator로 이후 type()/press()를 호출하면
     "strict mode violation: resolved to 2 elements"로 죽는다(실측 확인).
     """
-    _current_text_section(frame).click()
+    with _body_step('본문 입력 영역 클릭'):
+        _current_text_section(frame).click()
 
     local_image_paths = [img.path for img in parsed.images if img.is_local]
 
@@ -285,7 +739,12 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     highlight_requests: list[tuple[str, int]] = []
     running_text = ""
 
-    for line in parsed.body_lines:
+    for block_number, block in enumerate(split_body_blocks(parsed.body_lines), start=1):
+        if isinstance(block, MarkdownTable):
+            with _body_step(f'블록 {block_number} 표 삽입'):
+                _insert_native_table(frame, block)
+            continue
+        line = block
         stripped = line.strip()
         if stripped == "":
             continue
@@ -296,21 +755,26 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
         if matched_path:
             candidate = Path(matched_path)
             resolved_path = str(candidate if candidate.is_absolute() else (base_dir / candidate).resolve())
-            upload_image(frame, resolved_path)
+            with _body_step(f'블록 {block_number} 이미지 업로드'):
+                upload_image(frame, resolved_path)
+            with _body_step(f'블록 {block_number} 이미지 뒤 줄바꿈'):
+                _current_text_section(frame).press("Enter")
         elif line.startswith(HEADING_PREFIX):
-            _current_text_section(frame).press("Enter")
             heading_text = HIGHLIGHT_MARKER_PATTERN.sub(r"\1", line[len(HEADING_PREFIX) :])
             # 소제목에 마크다운 링크가 섞여 있어도(정상적인 사용은 아니지만) 대괄호/
             # URL 문법이 그대로 노출되지 않도록 앵커 텍스트만 남긴다. 소제목은 링크
             # 서식(밑줄 등)까지는 적용하지 않는다 — 인용구 컴포넌트라 하이라이트/링크가
             # 훑는 .se-section-text 검색 대상이 아니라 지연 적용 방식 자체를 쓸 수 없다.
             heading_text = INLINE_MD_LINK_FULL_PATTERN.sub(r"\1", heading_text)
-            _apply_quotation_line(frame)
-            frame.owner.page.wait_for_timeout(HEADING_FORMAT_APPLY_DELAY_MS)
-            _current_text_section(frame).type(heading_text, delay=TYPE_DELAY_MS)
-            _exit_quotation_block(frame)
-            frame.owner.page.wait_for_timeout(HEADING_SAFETY_DELAY_MS)
-            continue
+            with _body_step(f'블록 {block_number} 소제목 인용구 시작'):
+                _current_text_section(frame).press("Enter")
+                _apply_quotation_line(frame)
+                frame.owner.page.wait_for_timeout(HEADING_FORMAT_APPLY_DELAY_MS)
+            with _body_step(f'블록 {block_number} 소제목 입력'):
+                _current_text_section(frame).type(heading_text, delay=TYPE_DELAY_MS)
+            with _body_step(f'블록 {block_number} 소제목 인용구 종료'):
+                _exit_quotation_block(frame)
+                frame.owner.page.wait_for_timeout(HEADING_SAFETY_DELAY_MS)
         else:
             # 링크가 있으면 이 줄은 여러 문단(링크 앞 문장/링크 카드/링크 뒤 문장)으로
             # 쪼개진다 — 링크가 없으면 세그먼트 1개(전체 줄)뿐이라 기존과 동일하게
@@ -322,15 +786,16 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
                     if content.strip() == "":
                         continue
                     clean_text, running_text = _consume_highlight_markers(content, running_text, highlight_requests)
-                    _current_text_section(frame).type(clean_text, delay=TYPE_DELAY_MS)
+                    with _body_step(f'블록 {block_number} 문단 입력'):
+                        _current_text_section(frame).type(clean_text, delay=TYPE_DELAY_MS)
                 else:
                     _, anchor, url = segment
-                    _current_text_section(frame).type(anchor, delay=TYPE_DELAY_MS)
+                    with _body_step(f'블록 {block_number} 링크 문구 입력'):
+                        _current_text_section(frame).type(anchor, delay=TYPE_DELAY_MS)
                     link_requests.append((anchor, running_text.count(anchor), url))
                     running_text += anchor
-                _current_text_section(frame).press("Enter")
-            continue
-        _current_text_section(frame).press("Enter")
+                with _body_step(f'블록 {block_number} 문단 줄바꿈'):
+                    _current_text_section(frame).press("Enter")
 
     # 링크는 뒤(occurrence_index가 큰 것)에서부터 앞으로 적용한다 — 하이라이트와
     # 달리 링크는 적용에 성공하면 플레이스홀더 문단 전체가 카드 컴포넌트로 완전히
@@ -338,11 +803,13 @@ def input_body(frame: Any, parsed: ParsedMarkdown, base_dir: Path) -> None:
     # 링크가 사라지는 순간 그 뒤 플레이스홀더들의 실제 등장 순번이 한 칸씩 당겨져서
     # 타이핑 시점에 계산해둔 occurrence_index와 어긋나 못 찾는 문제가 있었다. 뒤에서
     # 부터 지우면 아직 처리 안 한 앞쪽 occurrence_index는 영향을 받지 않는다.
-    for anchor_text, occurrence_index, url in reversed(link_requests):
-        _apply_link(frame, anchor_text, occurrence_index, url)
+    for link_number in range(len(link_requests), 0, -1):
+        anchor_text, occurrence_index, url = link_requests[link_number - 1]
+        _apply_link(frame, anchor_text, occurrence_index, url, link_number=link_number)
 
-    for phrase, occurrence_index in highlight_requests:
-        _apply_highlight(frame, phrase, occurrence_index)
+    for number, (phrase, occurrence_index) in enumerate(highlight_requests, start=1):
+        with _body_step(f'강조 표시 {number} 적용'):
+            _apply_highlight(frame, phrase, occurrence_index)
 
 
 def _fallback_link_label(url: str) -> str:
@@ -534,7 +1001,7 @@ def _exit_quotation_block(frame: Any) -> None:
     frame.owner.page.mouse.click(x, y)
 
 
-def _apply_link(frame: Any, anchor_text: str, occurrence_index: int, url: str) -> None:
+def _apply_link(frame: Any, anchor_text: str, occurrence_index: int, url: str, *, link_number: int = 1) -> None:
     """anchor_text(마크다운 링크의 앵커 텍스트, 또는 단독 URL이면 _fallback_link_label이
     만든 도메인 기반 라벨 — _split_line_by_links가 링크 문단에 심어둔 텍스트)의
     occurrence_index번째(0-based) 등장 위치를 url로 연결된 미리보기 카드로 바꾼다.
@@ -563,38 +1030,67 @@ def _apply_link(frame: Any, anchor_text: str, occurrence_index: int, url: str) -
     모든 링크 적용이 연쇄적으로 실패한다(실측 확인).
     """
     try:
+        domain = urlparse(url).hostname or '확인 불가'
+    except ValueError:
+        domain = '확인 불가'
+    started = monotonic()
+    attempt = 0
+    stage = '링크 문구 선택'
+    url_input = frame.locator(LINK_URL_INPUT_SELECTOR)
+    try:
         if not _select_text_occurrence(frame, anchor_text, occurrence_index):
-            print(f"경고: 링크 앵커 텍스트를 찾지 못함({anchor_text!r}), 링크 없이 넘어갑니다.", file=sys.stderr)
-            return
+            raise EditorError('선택할 링크 문구를 찾지 못했습니다.')
+        stage = '링크 팝업 열기'
         frame.locator(LINK_BUTTON_SELECTOR).click(timeout=LINK_STYLE_TIMEOUT_MS, force=True)
-        frame.locator(LINK_URL_INPUT_SELECTOR).fill(url)
-
-        last_error: Exception | None = None
+        stage = 'URL 입력'
+        url_input.fill(url, timeout=LINK_STYLE_TIMEOUT_MS)
+        confirm = frame.locator(LINK_CONFIRM_BUTTON_SELECTOR + ':visible:enabled')
         for attempt in range(1, LINK_SEARCH_RETRY_COUNT + 1):
             try:
+                stage = '미리보기 요청'
                 frame.locator(LINK_SEARCH_BUTTON_SELECTOR).click(timeout=LINK_STYLE_TIMEOUT_MS)
-                # 확인 버튼은 검색이 OG 미리보기를 불러와 disabled를 풀어줄 때까지
-                # 비활성 상태다 — Locator.click()은 기본적으로 "enabled" 상태를
-                # 기다렸다가 누르므로 별도 폴링 없이 타임아웃만 넉넉히 주면 된다
-                # (네트워크 요청이라 버튼 클릭보다 오래 걸릴 수 있음).
-                frame.locator(LINK_CONFIRM_BUTTON_SELECTOR).click(timeout=LINK_STYLE_TIMEOUT_MS * 2)
-                last_error = None
+                stage = '미리보기 응답 대기'
+                confirm.wait_for(state='visible', timeout=LINK_STYLE_TIMEOUT_MS * 2)
                 break
-            except Exception as exc:
-                last_error = exc
-                if attempt < LINK_SEARCH_RETRY_COUNT:
-                    print(
-                        f"경고: 링크 미리보기 로드 실패({url!r}), 재시도 {attempt}/{LINK_SEARCH_RETRY_COUNT}",
-                        file=sys.stderr,
-                    )
-        if last_error is not None:
-            raise last_error
-    except Exception:
-        print(f"경고: 링크 적용 실패({url!r}), 일반 텍스트로 남습니다.", file=sys.stderr)
+            except PlaywrightTimeoutError as exc:
+                if attempt == LINK_SEARCH_RETRY_COUNT:
+                    raise
+                print(f'진단: 링크 미리보기 재시도 - 번호={link_number}, 도메인={domain}, 단계={stage}, '
+                      f'시도={attempt}/{LINK_SEARCH_RETRY_COUNT}, 경과={monotonic() - started:.2f}초, '
+                      f'{_editor_error_detail(exc)}', flush=True)
+        stage = '카드 삽입 확인 버튼 조작 가능 대기'
         try:
-            frame.locator(LINK_POPUP_CLOSE_BUTTON_SELECTOR).click(timeout=POPUP_CHECK_TIMEOUT_MS)
-        except Exception:
-            pass
+            confirm.click(trial=True, timeout=LINK_STYLE_TIMEOUT_MS)
+        except PlaywrightTimeoutError as exc:
+            print(f'진단: 링크 확인 버튼 대기 재시도 - 번호={link_number}, 도메인={domain}, '
+                  f'{_editor_error_detail(exc)}', flush=True)
+            confirm.click(trial=True, timeout=LINK_STYLE_TIMEOUT_MS)
+        cards = frame.locator(LINK_CARD_SELECTOR)
+        new_card = cards.nth(cards.count())
+        stage = '카드 삽입 확인 버튼 클릭'
+        try:
+            confirm.click(timeout=LINK_STYLE_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            # The click may have reached the editor. Check its effect without submitting again.
+            if not new_card.is_visible() or url_input.is_visible():
+                raise
+            return
+        stage = '링크 팝업 닫힘 확인'
+        url_input.wait_for(state='hidden', timeout=LINK_STYLE_TIMEOUT_MS)
+        stage = '새 링크 카드 삽입 확인'
+        new_card.wait_for(state='visible', timeout=LINK_STYLE_TIMEOUT_MS)
+    except (PlaywrightError, EditorError) as exc:
+        print(f'진단: 링크 미적용 또는 결과 불명 - 번호={link_number}, 도메인={domain}, 단계={stage}, '
+              f'미리보기 시도={attempt}/{LINK_SEARCH_RETRY_COUNT}, 경과={monotonic() - started:.2f}초, '
+              f'{_editor_error_detail(exc)}', flush=True)
+        try:
+            if url_input.is_visible():
+                frame.locator(LINK_POPUP_CLOSE_BUTTON_SELECTOR + ':visible').click(timeout=POPUP_CHECK_TIMEOUT_MS)
+                url_input.wait_for(state='hidden', timeout=POPUP_CHECK_TIMEOUT_MS)
+                print(f'진단: 링크 팝업 정리 완료 - 번호={link_number}', flush=True)
+        except PlaywrightError as cleanup_error:
+            print(f'진단: 링크 팝업 정리 실패 - 번호={link_number}, {_editor_error_detail(cleanup_error)}', flush=True)
+            raise EditorError(f'링크 {link_number}번 처리 후 팝업을 닫지 못했습니다.') from cleanup_error
 
 
 def publish(page: Any, category: str | None) -> None:
@@ -628,7 +1124,53 @@ def publish(page: Any, category: str | None) -> None:
         ) from exc
 
 
-def save_draft(page: Any) -> None:
+@contextmanager
+def draft_stage(label: str):
+    started = monotonic()
+    print(f"진단: {label} 시작", flush=True)
+    try:
+        yield
+    except Exception as exc:
+        print(f"진단: {label} 실패 ({monotonic() - started:.2f}초, {type(exc).__name__})", flush=True)
+        raise
+    else:
+        print(f"진단: {label} 완료 ({monotonic() - started:.2f}초)", flush=True)
+
+
+_DRAFT_NOTICE_PATTERN = r"^\s*임시\s*저장(?:이)?\s*(?:완료\s*)?되었\s*습니다[.!]?\s*$"
+_WATCH_DRAFT_NOTICE = """({ marker, pattern }) => {
+    const expected = new RegExp(pattern);
+    const root = document.body;
+    const isNotice = el => expected.test(el.textContent) && el.getClientRects().length &&
+        getComputedStyle(el).visibility === 'visible' &&
+        !el.closest('.se-component, [contenteditable="true"]');
+    const check = node => {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        if (!(el instanceof HTMLElement) || !el.isConnected) return false;
+        if (isNotice(el)) return true;
+        const text = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let part = text.nextNode(); part; part = text.nextNode()) {
+            if (isNotice(part.parentElement)) return true;
+        }
+        return false;
+    };
+    const observer = new MutationObserver(records => {
+        for (const record of records) {
+            const nodes = record.type === 'childList' ? record.addedNodes : [record.target];
+            if ([...nodes].some(check)) {
+                observer.disconnect();
+                console.info(marker);
+                return;
+            }
+        }
+    });
+    observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ['class', 'style', 'hidden'] });
+    window[marker] = observer;
+}"""
+
+
+def save_draft(page: Any) -> bool:
     """실제 발행 대신 임시저장으로 글을 남긴다.
 
     publish()와 달리 옵션 패널/최종 확인 없이 상단 툴바의 "저장" 버튼(실측: 접근성
@@ -636,21 +1178,60 @@ def save_draft(page: Any) -> None:
     자동화가 실수로 바로 발행해버리는 사고를 막기 위해 main.py는 이 함수를 기본으로
     호출한다(발행은 사람이 네이버 블로그 글쓰기 화면에서 직접 확인 후 진행).
 
-    "임시저장되었습니다" 토스트로 완료 확인을 시도하지만, 실측 결과 이 문구가 뜨지
-    않거나 다른 문구/타이밍이라 못 찾는 경우가 있었다. 저장 버튼 클릭 자체는
-    확실히 일어났고 네이버 에디터는 어차피 주기적으로 자동 임시저장도 하므로,
-    토스트를 못 찾았다고 EditorError를 던져 전체 실행을 실패로 만들지 않고
-    경고만 남긴다.
+    기존 알림이 사라지면 편집 프레임과 바깥 페이지의 새 알림을 감시한 뒤
+    저장 버튼을 누른다. 새 확인 알림을 감지하지 못하면 결과 불명으로 반환한다.
     """
     frame = page.frame_locator("#mainFrame")
+    marker = f"draft-confirmation-{uuid4().hex}"
+    watched = []
+    response_statuses = []
+    watching_responses = False
 
-    frame.get_by_role("button", name="저장", exact=True).click()
+    def record_response(response):
+        if response.request.method in {"POST", "PUT", "PATCH"} and urlparse(response.url).hostname == "blog.naver.com":
+            response_statuses.append(response.status)
 
     try:
-        frame.get_by_text("임시저장되었습니다").wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
-    except Exception:
-        print(
-            "경고: \"저장\" 버튼은 클릭했지만 임시저장 확인 토스트를 찾지 못했습니다 "
-            "(저장 자체는 됐을 가능성이 높음 — 네이버 블로그에서 직접 확인하세요).",
-            file=sys.stderr,
-        )
+        with draft_stage("기존 임시저장 알림 사라짐 대기"):
+            editor_frame = page.locator("#mainFrame").element_handle(timeout=DEFAULT_TIMEOUT_MS).content_frame()
+            if editor_frame is None:
+                raise EditorError('임시저장 화면의 프레임을 확인하지 못했습니다.')
+            for scope in (page.main_frame, editor_frame):
+                outside_content = scope.locator(
+                    ':visible:not(.se-component, .se-component *, [contenteditable="true"], [contenteditable="true"] *)')
+                notice = scope.get_by_text(re.compile(_DRAFT_NOTICE_PATTERN)).and_(outside_content)
+                notice.first.wait_for(state="hidden", timeout=DEFAULT_TIMEOUT_MS)
+
+        with draft_stage("임시저장 확인 알림 감시 준비"):
+            for scope in (page.main_frame, editor_frame):
+                scope.evaluate(_WATCH_DRAFT_NOTICE, {"marker": marker, "pattern": _DRAFT_NOTICE_PATTERN})
+                watched.append(scope)
+
+        page.on("response", record_response)
+        watching_responses = True
+        with page.expect_console_message(lambda msg: msg.text == marker, timeout=DEFAULT_TIMEOUT_MS) as confirmation:
+            with draft_stage("저장 버튼 클릭"):
+                frame.get_by_role("button", name="저장", exact=True).click()
+            with draft_stage("새 임시저장 확인 알림 대기"):
+                _ = confirmation.value
+        return True
+    except (PlaywrightError, EditorError) as exc:
+        browser = page.context.browser
+        if browser is not None and not browser.is_connected():
+            print("진단: 임시저장 처리 중 Chrome 연결이 끊겼습니다.", flush=True)
+        elif page.is_closed():
+            print("진단: 임시저장 처리 중 에디터 탭이 닫혔습니다.", flush=True)
+        elif type(exc).__name__ == "TargetClosedError":
+            print("진단: 임시저장 처리 중 에디터 연결 대상이 종료됐습니다.", flush=True)
+        if watching_responses:
+            statuses = ", ".join(map(str, sorted(set(response_statuses)))) or "응답 감지 없음"
+            print(f"진단: 네이버 블로그 변경 요청의 HTTP 상태={statuses} (저장 확인 신호 아님)", flush=True)
+        return False
+    finally:
+        if watching_responses:
+            page.remove_listener("response", record_response)
+        for scope in watched:
+            try:
+                scope.evaluate("key => { window[key]?.disconnect(); delete window[key]; }", marker)
+            except PlaywrightError:
+                pass

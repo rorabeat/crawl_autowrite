@@ -1,0 +1,3997 @@
+"""오케스트레이터 GUI 진입점.
+
+docs/PRD.md 6절 모듈 구조의 app.py에 해당한다. 5탭(입력/AGENTS.md 편집/실행·로그/멀티 작업/결과) 중
+"입력" 탭은 Task 003에서 InputTab으로 구현했다. 나머지 탭은 이후 Task에서 채운다.
+"""
+
+import ctypes
+import html
+import json
+import logging
+import re
+import shutil
+import struct
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from PySide6.QtCore import QBuffer, QIODevice, Qt, QObject, QPointF, QRectF, QThread, QTimer, QUrl, Signal, SignalInstance
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QDesktopServices,
+    QFontDatabase,
+    QIcon,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QRadialGradient,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QRadioButton,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QStackedWidget,
+    QTextEdit,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+import agents_editor
+import config
+import pipeline
+import shopping_ui
+from GetImage import image_search
+from image_input import ImageDropList
+from pipeline import PipelineContext, TaskItem
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(message)s", datefmt="%H:%M:%S")
+logger = logging.getLogger(__name__)
+
+# 로그 패널에 한 줄로 찍히는 메시지 길이 상한. AGENTS.md 전문이나 크롤링 결과 원문처럼
+# 큰 텍스트 블록이 서브프로세스 표준출력을 통해 그대로 로그로 흘러들어오는 경우를 대비해
+# 잘라서 보여준다(전체 내용은 output/, blog/ 폴더의 실제 파일에서 확인).
+LOG_LINE_MAX_CHARS = 300
+
+TAB_TITLES = ["입력", "AGENTS.md 편집", "실행·로그", "결과", "스타일 분석 멀티작업", "초안 검토"]
+
+
+def build_app_icon(size: int = 256) -> QIcon:
+    """외부 이미지 파일 없이 코드로 그리는 앱 아이콘 — "크롤링 -> AI 생성 -> 네이버
+    발행" 3단계 파이프라인을 하나의 흐르는 곡선 위 세 개의 노드로 형상화했다.
+
+    이전 버전은 펜촉(글쓰기) 모티프였는데, 그 자체는 "블로그 글쓰기 도구"라는
+    범용적인 특징만 담을 뿐 이 프로그램 고유의 정체성(3단계 자동화 오케스트레이터,
+    최종 목적지가 네이버 블로그)을 드러내지 못했다. 그래서 파이프라인의 흐름 자체를
+    아이콘화했다: 파란 점(크롤링/수집) -> 노란 스파크(AI 생성) -> 네이버 브랜드
+    그린 체크(발행 완료)를 곡선 화살표로 연결해, 여러 단계를 자동으로 이어 처리한다는
+    이 앱만의 특징을 한눈에 보여준다. 작은 아이콘 크기에서도 알아볼 수 있도록 세부
+    묘사 대신 굵은 도형 3개 + 곡선 하나로 단순화했다. 파일 에셋 없이 항상 동일하게
+    렌더링된다.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    margin = size * 0.06
+    rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
+    radius = size * 0.22
+
+    bg_gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    bg_gradient.setColorAt(0.0, QColor("#1B1F3B"))
+    bg_gradient.setColorAt(1.0, QColor("#2D2A5E"))
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(bg_gradient))
+    painter.drawRoundedRect(rect, radius, radius)
+
+    # 3단계를 잇는 흐름 곡선: 왼쪽 아래(수집) -> 가운데(생성) -> 오른쪽 위(발행).
+    crawl_pt = QPointF(size * 0.27, size * 0.74)
+    generate_pt = QPointF(size * 0.50, size * 0.46)
+    publish_pt = QPointF(size * 0.73, size * 0.28)
+
+    path = QPainterPath(crawl_pt)
+    path.cubicTo(
+        QPointF(size * 0.30, size * 0.54),
+        QPointF(size * 0.38, size * 0.50),
+        generate_pt,
+    )
+    path.cubicTo(
+        QPointF(size * 0.62, size * 0.42),
+        QPointF(size * 0.66, size * 0.36),
+        publish_pt,
+    )
+
+    line_gradient = QLinearGradient(crawl_pt, publish_pt)
+    line_gradient.setColorAt(0.0, QColor("#4FA3FF"))
+    line_gradient.setColorAt(0.5, QColor("#FFD166"))
+    line_gradient.setColorAt(1.0, QColor("#03C75A"))
+
+    pen = QPen(QBrush(line_gradient), size * 0.045)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
+
+    # 1단계: 크롤링/수집 — 파란 점.
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(QColor("#4FA3FF")))
+    painter.drawEllipse(crawl_pt, size * 0.052, size * 0.052)
+
+    # 2단계: AI 생성 — 네 꼭짓점 스파클.
+    spark_r = size * 0.075
+    spark = QPolygonF(
+        [
+            QPointF(generate_pt.x(), generate_pt.y() - spark_r),
+            QPointF(generate_pt.x() + spark_r * 0.32, generate_pt.y() - spark_r * 0.32),
+            QPointF(generate_pt.x() + spark_r, generate_pt.y()),
+            QPointF(generate_pt.x() + spark_r * 0.32, generate_pt.y() + spark_r * 0.32),
+            QPointF(generate_pt.x(), generate_pt.y() + spark_r),
+            QPointF(generate_pt.x() - spark_r * 0.32, generate_pt.y() + spark_r * 0.32),
+            QPointF(generate_pt.x() - spark_r, generate_pt.y()),
+            QPointF(generate_pt.x() - spark_r * 0.32, generate_pt.y() - spark_r * 0.32),
+        ]
+    )
+    glow = QRadialGradient(generate_pt, spark_r * 2.2)
+    glow.setColorAt(0.0, QColor(255, 209, 102, 140))
+    glow.setColorAt(1.0, QColor(255, 209, 102, 0))
+    painter.setBrush(QBrush(glow))
+    painter.drawEllipse(generate_pt, spark_r * 2.2, spark_r * 2.2)
+    painter.setBrush(QBrush(QColor("#FFD166")))
+    painter.drawPolygon(spark)
+
+    # 3단계: 발행 — 네이버 브랜드 그린 원 + 흰 체크.
+    publish_r = size * 0.11
+    painter.setBrush(QBrush(QColor("#03C75A")))
+    painter.drawEllipse(publish_pt, publish_r, publish_r)
+
+    check = QPainterPath()
+    check.moveTo(publish_pt.x() - publish_r * 0.48, publish_pt.y() + publish_r * 0.02)
+    check.lineTo(publish_pt.x() - publish_r * 0.12, publish_pt.y() + publish_r * 0.38)
+    check.lineTo(publish_pt.x() + publish_r * 0.5, publish_pt.y() - publish_r * 0.35)
+    check_pen = QPen(QColor(255, 255, 255, 245), size * 0.028)
+    check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(check_pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(check)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def save_app_icon_ico(path: Path, icon: QIcon | None = None) -> Path:
+    """QIcon을 Windows .ico 파일로 저장한다(PyInstaller --icon, 작업표시줄 WM_SETICON용)."""
+    icon = icon or build_app_icon()
+    png_entries: list[tuple[int, bytes]] = []
+    for size in (16, 32, 48, 64, 128, 256):
+        image = icon.pixmap(size, size).toImage()
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        png_entries.append((size, bytes(buffer.data())))
+
+    offset = 6 + 16 * len(png_entries)
+    parts = [struct.pack("<HHH", 0, 1, len(png_entries))]
+    for size, png_data in png_entries:
+        parts.append(
+            struct.pack(
+                "<BBBBHHII",
+                size if size < 256 else 0,
+                size if size < 256 else 0,
+                0,
+                0,
+                1,
+                32,
+                len(png_data),
+                offset,
+            )
+        )
+        offset += len(png_data)
+    for _, png_data in png_entries:
+        parts.append(png_data)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(parts))
+    return path
+
+
+def _apply_windows_taskbar_icon(window: QMainWindow, ico_path: Path) -> None:
+    """python.exe로 실행할 때 작업표시줄 버튼에 앱 아이콘을 강제로 적용한다."""
+    if sys.platform != "win32":
+        return
+    hwnd = int(window.winId())
+    if hwnd == 0:
+        return
+
+    load_image = ctypes.windll.user32.LoadImageW
+    load_image.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+    ]
+    load_image.restype = ctypes.c_void_p
+    send_message = ctypes.windll.user32.SendMessageW
+
+    ico_str = str(ico_path.resolve())
+    flags = 0x0010 | 0x0040  # LR_LOADFROMFILE | LR_DEFAULTSIZE
+    for icon_type in (0, 1):  # ICON_SMALL, ICON_BIG
+        hicon = load_image(None, ico_str, 1, 0, 0, flags)
+        if hicon:
+            send_message(hwnd, 0x0080, icon_type, hicon)  # WM_SETICON
+
+
+def _setup_windows_taskbar(window: QMainWindow, icon: QIcon) -> None:
+    """Windows 작업표시줄에 앱 아이콘·이름이 보이도록 등록한다."""
+    if sys.platform != "win32":
+        return
+    ico_path = Path(tempfile.gettempdir()) / "crawl_autowrite_orchestrator.ico"
+    save_app_icon_ico(ico_path, icon)
+    _apply_windows_taskbar_icon(window, ico_path)
+
+
+# codex CLI 로그인 세션(refresh token)이 만료/폐기됐을 때 codex exec가 stdout에 남기는
+# 에러 문구들. run_generation 등이 codex exec를 서브프로세스로 실행하므로 이 문구들은
+# subprocess_runner.run()이 logger.info(line)으로 그대로 로깅한다(사용자 리포트: 이
+# 상태에서 글 생성이 조용히 "실패"로만 남아 원인을 알기 어려웠음 — 팝업으로 안내).
+CODEX_AUTH_ERROR_PATTERNS = (
+    "token was revoked",
+    "token has been invalidated",
+    "token_expired",
+    "refresh_token_invalidated",
+    "Please log out and sign in again",
+)
+
+
+class QtLogHandler(logging.Handler):
+    """logging 레코드를 Qt 시그널로 중계하는 핸들러.
+
+    subprocess_runner가 크롤링/codex exec/발행 서브프로세스의 표준출력 각 줄을
+    logger.info()로 남기므로, 이 핸들러를 root logger에 붙이면 서브프로세스 상세
+    출력까지 GUI 로그 패널에 그대로 노출된다. emit()은 워커/리더 스레드에서도 호출될
+    수 있으므로 위젯을 직접 건드리지 않고 시그널만 발행한다(스레드 안전은 시그널이 보장).
+
+    시간·로거명 등 부가 정보는 최소화해 "HH:MM:SS 레벨1글자 메시지" 형태로만 표시하고,
+    AGENTS.md 전문/크롤링 원문처럼 긴 줄은 LOG_LINE_MAX_CHARS로 잘라 핵심 진행 로그가
+    묻히지 않게 한다.
+
+    auth_error_signal이 주어지면, CODEX_AUTH_ERROR_PATTERNS와 일치하는 줄이 로깅될 때
+    (codex 로그인 만료) 별도로 그 시그널도 함께 발행해 MainWindow가 팝업으로 안내할 수
+    있게 한다.
+    """
+
+    def __init__(self, signal: SignalInstance, auth_error_signal: SignalInstance | None = None) -> None:
+        super().__init__()
+        self._signal = signal
+        self._auth_error_signal = auth_error_signal
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname).1s %(message)s", datefmt="%H:%M:%S"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        raw_message = record.getMessage()
+        line = self.format(record)
+        if len(line) > LOG_LINE_MAX_CHARS:
+            line = line[:LOG_LINE_MAX_CHARS] + f"... (생략, 총 {len(line)}자)"
+        self._signal.emit(line)
+        if self._auth_error_signal is not None and any(p in raw_message for p in CODEX_AUTH_ERROR_PATTERNS):
+            self._auth_error_signal.emit(raw_message)
+
+
+class LogPanel(QWidget):
+    """작업 진행 현황 화면의 진행 상태와 상세 로그 패널.
+
+    log_signal은 QtLogHandler가 어느 스레드에서 emit하든(워커/리더 스레드 포함) Qt가
+    자동으로 큐드 커넥션을 사용해 append_line을 GUI 스레드에서 실행하도록 보장한다.
+    """
+
+    log_signal = Signal(str)
+    codex_auth_error = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        # 이전에는 NoWrap이라 긴 줄(크롤링 원문, codex 프롬프트)마다 가로 스크롤이 생겼다
+        # (사용자 리포트: 화면 밖으로 잘려 보임). WidgetWidth로 바꾸면 패널 너비 기준으로
+        # 자동 줄바꿈된다.
+        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+
+        self.clear_button = QPushButton("로그 초기화")
+        self.clear_button.clicked.connect(self.log_view.clear)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("상세 로그"))
+        header_row.addStretch()
+        header_row.addWidget(self.clear_button)
+
+        layout = QVBoxLayout(self)
+        self.summary_label = QLabel("대기 중 — 실행할 작업을 추가해 주세요.")
+        self.summary_label.setWordWrap(True)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p% (단계 기준)")
+        self.summary_log = QTextEdit()
+        self.summary_log.setReadOnly(True)
+        self.summary_log.setMaximumHeight(130)
+        self.summary_log.document().setMaximumBlockCount(100)
+        self._progress_steps = {}
+        self._progress_names = ()
+        self._progress_title = ""
+        self._active_step = None
+        self._active_since = 0.0
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(1000)
+        self._progress_timer.timeout.connect(self._update_elapsed)
+        layout.addWidget(QLabel("간단 로그 · 현재 진행상황"))
+        layout.addWidget(self.summary_label)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.summary_log)
+        layout.addLayout(header_row)
+        layout.addWidget(self.log_view)
+
+        self.log_signal.connect(self.append_line)
+
+    def start_progress(self, title: str, names: tuple[str, ...]) -> None:
+        self._progress_title = title
+        self._progress_names = names
+        self._progress_steps = {}
+        self._active_step = None
+        self._progress_timer.stop()
+        self.progress_bar.setValue(0)
+        self.summary_label.setText(f"{title} · 준비 중")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {html.escape(title)} · 시작")
+
+    def update_progress(self, name: str, status: str) -> None:
+        if name not in self._progress_names:
+            return
+        labels = {"login": "네이버 로그인 확인", "crawl": "자료 수집·분석", "generate": "AI 글·이미지 작성",
+                  "image_gen": "이미지 생성 결과 확인", "image_search": "이미지 검색", "publish": "네이버 임시저장"}
+        states = {"running": "진행 중", "success": "완료", "skipped": "건너뜀",
+                  "failed": "실패", "canceled": "취소됨", "review": "초안 검토 대기"}
+        self._progress_steps[name] = status
+        # 실제 완료/생략된 단계만 계산한다. AI 응답 대기 중에는 값을 추측하지 않는다.
+        done = sum(self._progress_steps.get(n) in {"success", "skipped"} for n in self._progress_names)
+        self.progress_bar.setValue(min(99, int(done * 100 / len(self._progress_names))))
+        description = f"{labels.get(name, name)} · {states.get(status, status)}"
+        self._active_step = description if status == "running" else None
+        self._active_since = time.monotonic()
+        self.summary_label.setText(f"{self._progress_title} · {description}")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {html.escape(description)}")
+        if self._active_step:
+            self._progress_timer.start()
+        else:
+            self._progress_timer.stop()
+
+    def _update_elapsed(self) -> None:
+        if self._active_step:
+            elapsed = int(time.monotonic() - self._active_since)
+            self.summary_label.setText(f"{self._progress_title} · {self._active_step} ({elapsed}초 경과)")
+
+    def finish_progress(self, result: dict) -> None:
+        self._progress_timer.stop()
+        self._active_step = None
+        statuses = [step.get("status") for step in result.get("steps", {}).values()]
+        state = "취소됨" if "canceled" in statuses else ("실패" if "failed" in statuses or result.get("error") else "완료")
+        if state == "완료":
+            self.progress_bar.setValue(100)
+        self.summary_label.setText(f"{self._progress_title} · {state}")
+        self.summary_log.append(f"{time.strftime('%H:%M:%S')} {state}")
+
+    def append_line(self, line: str) -> None:
+        # subprocess_runner.run()이 codex exec에게 stdin으로 넘기는 프롬프트를 "[CODEX 입력]"
+        # 마커를 붙여 로깅하므로(사용자 요청: codex에게 명령으로 전달하는 부분을 하이라이트),
+        # 여기서 그 마커를 찾아 배경색을 입힌다. 모든 줄을 HTML로 렌더링해야(append()의
+        # 자동 rich-text 감지에 맡기지 않고) 일반 로그 줄에 우연히 "<"가 섞여도 태그로
+        # 오인되지 않는다.
+        escaped = html.escape(line)
+        if "[CODEX 입력]" in line:
+            self.log_view.append(f'<span style="background-color:#5a4a00;color:#ffe08a;">{escaped}</span>')
+        else:
+            self.log_view.append(f"<span>{escaped}</span>")
+
+
+def _populate_agents_md_combo(combo: QComboBox, current_path: str | None) -> None:
+    """agents/ 폴더에 모아둔 AGENTS.md 템플릿 파일명으로 combo를 채운다.
+
+    첫 항목은 항상 "기본값(AGENTS.md)"(userData=None)이고, 그 뒤로 agents/ 폴더의 나머지
+    *.md 파일이 파일명(확장자 제외) 기준으로 나열된다. userData는 work_dir_choice_combo와
+    같은 이유로 Path가 아니라 str(경로)를 쓴다(QComboBox.findData가 Path 객체는 identity
+    비교라 못 찾음). current_path가 목록에 없는 값(파일이 옮겨지거나 지워진 경우)이면
+    잃어버리지 않도록 항목을 하나 더 추가해 선택 상태를 보존한다.
+    """
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem("기본값 (AGENTS.md)", None)
+    default_resolved = config.AGENTS_MD_PATH.resolve()
+    for md_file in config.list_agents_md_files():
+        if md_file.resolve() == default_resolved:
+            continue
+        combo.addItem(md_file.stem, str(md_file))
+    if current_path:
+        idx = combo.findData(current_path)
+        if idx == -1:
+            combo.addItem(f"{Path(current_path).name} (agents 폴더 밖)", current_path)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(idx)
+    else:
+        combo.setCurrentIndex(0)
+    combo.blockSignals(False)
+
+
+def _populate_account_combo(combo: QComboBox, current_account_id: str | None, enabled: bool = False) -> None:
+    """등록된 계정으로 콤보를 채운다.
+
+    첫 항목은 계정 미선택 표시다. current_account_id가 없으면 pipeline.default_account_id()로
+    마지막 발행 계정을 기본 선택값으로 채운다 — 매번 "기본 계정"으로 떨어져 크롬
+    프로필이 어긋나고 재로그인이 반복되는 문제를 피하기 위함이다.
+    current_account_id가 목록에 없으면(삭제된 계정 등) 기본 계정으로 되돌린다.
+
+    작업(태스크)에 붙는 계정 선택 콤보는 사용자 요청으로 비활성화되어 있다 —
+    위 규칙으로 정해진 계정을 표시만 하고, 사용자가 값을 바꾸지 못하도록
+    setEnabled(False)로 잠근다(기본값). 계정 자체를 바꾸려면 "계정 관리" 버튼
+    (다이얼로그)을 사용해야 한다. 다만 "로그인" 버튼 옆의 로그인 대상 계정 선택처럼,
+    작업과 무관하게 사용자가 직접 계정을 골라야 하는 콤보는 enabled=True로 열어 둔다
+    (사용자 요청: 로그인 버튼은 각 작업의 계정 정보를 쓰지 않고 별도로 선택).
+    """
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem("계정 선택", None)
+    for account in pipeline.load_accounts():
+        combo.addItem(account["label"], account["id"])
+    resolved_account_id = current_account_id or pipeline.default_account_id()
+    idx = combo.findData(resolved_account_id) if resolved_account_id else 0
+    combo.setCurrentIndex(idx if idx >= 0 else 0)
+    combo.setEnabled(enabled)
+    combo.blockSignals(False)
+
+
+def _open_account_manager(parent: QWidget, combo: QComboBox) -> None:
+    """계정 관리 다이얼로그를 닫은 뒤 콤보를 갱신한다."""
+    current = combo.currentData()
+    AccountManagerDialog(parent).exec()
+    _populate_account_combo(combo, current)
+
+
+class AccountManagerDialog(QDialog):
+    """네이버 계정 식별 정보를 추가/수정/삭제하는 관리 다이얼로그.
+
+    추가/수정/삭제 버튼을 누르는 즉시
+    pipeline.save_accounts()로 반영한다(계정 개수가 적어 별도 "저장" 버튼 없이 즉시 반영이
+    더 안전하다는 판단 — TaskManager처럼 대량의 항목을 다루지 않음).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("네이버 계정 관리")
+        self.accounts: list[config.Account] = pipeline.load_accounts()
+
+        self.account_list = QListWidget()
+        self.account_list.currentRowChanged.connect(self._on_row_selected)
+
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("표시 이름(예: 본계정)")
+        self.naver_id_edit = QLineEdit()
+        self.naver_id_edit.setPlaceholderText("네이버 아이디")
+        self.blog_id_edit = QLineEdit()
+        self.blog_id_edit.setPlaceholderText("블로그 ID")
+        self.category_edit = QLineEdit()
+        self.category_edit.setPlaceholderText("카테고리(선택)")
+
+        self.add_button = QPushButton("추가")
+        self.add_button.clicked.connect(self._on_add)
+        self.update_button = QPushButton("선택 항목 수정")
+        self.update_button.clicked.connect(self._on_update)
+        self.delete_button = QPushButton("선택 항목 삭제")
+        self.delete_button.clicked.connect(self._on_delete)
+
+        close_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_box.rejected.connect(self.accept)
+
+        form_layout = QVBoxLayout()
+        for row_label, widget in (
+            ("표시 이름", self.label_edit),
+            ("네이버 아이디", self.naver_id_edit),
+            ("블로그 ID", self.blog_id_edit),
+            ("카테고리(선택)", self.category_edit),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(row_label))
+            row.addWidget(widget, 1)
+            form_layout.addLayout(row)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.add_button)
+        button_row.addWidget(self.update_button)
+        button_row.addWidget(self.delete_button)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("계정 식별 정보만 로컬에 저장합니다. 비밀번호는 저장하지 않습니다."))
+        layout.addWidget(self.account_list)
+        layout.addLayout(form_layout)
+        layout.addLayout(button_row)
+        layout.addWidget(close_box)
+        self.resize(420, 440)
+
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        self.account_list.clear()
+        for account in self.accounts:
+            self.account_list.addItem(f"{account['label']} ({account['naver_id']})")
+
+    def _on_row_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.accounts):
+            return
+        account = self.accounts[row]
+        self.label_edit.setText(account["label"])
+        self.naver_id_edit.setText(account["naver_id"])
+        self.blog_id_edit.setText(account["blog_id"])
+        self.category_edit.setText(account.get("category", ""))
+
+    def _read_form(self) -> config.Account | None:
+        label = self.label_edit.text().strip()
+        naver_id = self.naver_id_edit.text().strip()
+        blog_id = self.blog_id_edit.text().strip()
+        if not (label and naver_id and blog_id):
+            QMessageBox.warning(self, "네이버 계정 관리", "표시 이름/아이디/블로그 ID를 모두 입력해주세요.")
+            return None
+        return {
+            "id": "",
+            "label": label,
+            "naver_id": naver_id,
+            "blog_id": blog_id,
+            "category": self.category_edit.text().strip(),
+        }
+
+    def _on_add(self) -> None:
+        account = self._read_form()
+        if account is None:
+            return
+        account["id"] = uuid.uuid4().hex
+        self.accounts.append(account)
+        pipeline.save_accounts(self.accounts)
+        self._refresh_list()
+        self.account_list.setCurrentRow(len(self.accounts) - 1)
+
+    def _on_update(self) -> None:
+        row = self.account_list.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "네이버 계정 관리", "수정할 계정을 목록에서 먼저 선택하세요.")
+            return
+        account = self._read_form()
+        if account is None:
+            return
+        self.accounts[row].update(account | {"id": self.accounts[row]["id"]})
+        pipeline.save_accounts(self.accounts)
+        self._refresh_list()
+        self.account_list.setCurrentRow(row)
+
+    def _on_delete(self) -> None:
+        row = self.account_list.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "네이버 계정 관리", "삭제할 계정을 목록에서 먼저 선택하세요.")
+            return
+        reply = QMessageBox.question(self, "네이버 계정 관리", f"'{self.accounts[row]['label']}' 계정을 삭제할까요?")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        del self.accounts[row]
+        pipeline.save_accounts(self.accounts)
+        self._refresh_list()
+        for edit in (self.label_edit, self.naver_id_edit, self.blog_id_edit, self.category_edit):
+            edit.clear()
+
+
+class InputTab(QWidget):
+    """이미지 드래그 드롭·키워드/코멘트 입력·크롤링 사용 여부 토글을 제공하는 입력 탭.
+
+    동일 키워드로 이미 크롤링/이미지가 저장된 작업 폴더(config.find_existing_work_dirs)가
+    있으면 검색해 목록으로 보여주고, 사용자가 그중 하나를 재사용하도록 선택할 수 있다.
+    재사용을 선택하면 크롤링 체크박스/이미지 드롭 목록을 비활성화해 새로 크롤링하거나
+    이미지를 추가하지 않는다는 것을 명시한다(실제 건너뛰기는 pipeline.run_pipeline이 처리).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.selected_reuse_dir: Path | None = None
+        self._found_reuse_dirs: dict[str, Path] = {}
+
+        self.keyword_edit = QLineEdit()
+        self.keyword_edit.setPlaceholderText("키워드")
+
+        self.use_crawling_checkbox = QCheckBox("크롤링 사용")
+        self.use_crawling_checkbox.setChecked(True)
+
+
+        input_defaults = pipeline.load_input_defaults()
+
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(input_defaults.crawl_count)
+        self.crawl_count_spin.setSuffix("건")
+        self.crawl_count_spin.setEnabled(self.use_crawling_checkbox.isChecked())
+        self.use_crawling_checkbox.toggled.connect(self.crawl_count_spin.setEnabled)
+        self.crawl_count_spin.valueChanged.connect(self._save_input_defaults)
+
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(input_defaults.ai_model))
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.ai_model_combo.currentIndexChanged.connect(self._save_input_defaults)
+
+        self.account_combo = QComboBox()
+        _populate_account_combo(self.account_combo, input_defaults.account_id)
+        self.account_combo.currentIndexChanged.connect(self._save_input_defaults)
+        self.account_manage_button = QPushButton("계정 관리…")
+        self.account_manage_button.clicked.connect(self._on_manage_accounts_clicked)
+
+        # 작업을 만들지 않고도 미리 원하는 계정으로 로그인만 마쳐 둘 수 있게 하는 버튼
+        # (사용자 요청) — 로그인에 성공하면 세션이 저장되어, 이후 이 계정으로 큐에 넣는
+        # 글쓰기 작업들은 재로그인 없이 로그인된 상태 그대로 이어서 진행된다.
+        # 로그인 대상 계정은 위 account_combo(작업에 쓰일 계정, 비활성화됨)와는 별개로
+        # 사용자가 직접 고를 수 있게 열어 둔다(사용자 요청: 각 작업의 계정 정보를
+        # 쓰지 말고 로그인 버튼 옆에서 로그인할 아이디를 따로 선택).
+        self.login_account_combo = QComboBox()
+        _populate_account_combo(self.login_account_combo, None, enabled=True)
+        self.login_button = QPushButton("로그인")
+        self.login_button.clicked.connect(self._on_login_clicked)
+        self.logout_button = QPushButton("로그아웃")
+        self.logout_button.clicked.connect(self._on_logout_clicked)
+        self._prelogin_worker: PreloginWorker | None = None
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(input_defaults.generate_images)
+        self.generate_images_checkbox.toggled.connect(self._save_input_defaults)
+
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(input_defaults.image_gen_count)
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(input_defaults.generate_images)
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.image_gen_count_spin.valueChanged.connect(self._save_input_defaults)
+
+        # "AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청) — 이미지
+        # 개수는 image_gen_count_spin을 그대로 공유한다.
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(input_defaults.search_images)
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setToolTip(
+            "체크 해제 시 \"글쓰기 후\"에서는 원격 URL을 그대로 사용합니다(\"글쓰기 전\"은 로컬 파일이 "
+            "필요해 항상 다운로드합니다)."
+        )
+        self.search_download_checkbox.setChecked(input_defaults.search_images_download)
+        self.search_download_checkbox.setEnabled(input_defaults.search_images)
+        self.search_download_checkbox.toggled.connect(self._save_input_defaults)
+
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        if input_defaults.search_images_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(input_defaults.search_images)
+        self.search_timing_after_radio.setEnabled(input_defaults.search_images)
+        self.search_timing_before_radio.toggled.connect(self._on_search_timing_changed)
+
+        self.search_button = QPushButton("이미지 검색")
+        self.search_button.clicked.connect(self._on_search_images_clicked)
+        self.search_button.setEnabled(input_defaults.search_images and self.search_timing_before_radio.isChecked())
+
+        self.search_status_label = QLabel("")
+
+        self.agents_md_path: str | None = input_defaults.agents_md_path
+        self.agents_md_combo = QComboBox()
+        _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
+        self.agents_md_combo.currentIndexChanged.connect(self._on_agents_md_selected)
+
+        self.comment_edit = QTextEdit()
+        self.comment_edit.setPlaceholderText("comment(선택)")
+        self.comment_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.comment_edit.setFixedHeight(self.comment_edit.fontMetrics().lineSpacing() * 5 + 16)
+
+        self.image_drop_list = ImageDropList()
+        self.clear_images_button = QPushButton("이미지 초기화")
+        self.clear_images_button.clicked.connect(self._on_clear_images)
+
+        self.reuse_search_button = QPushButton("기존 데이터 검색")
+        self.reuse_search_button.clicked.connect(self._on_search_existing)
+        self.reuse_clear_button = QPushButton("재사용 해제")
+        self.reuse_clear_button.clicked.connect(self._on_reuse_cleared)
+        self.reuse_status_label = QLabel("재사용: 사용 안 함")
+
+        self.reuse_list = QListWidget()
+        self.reuse_list.setMaximumHeight(80)
+        self.reuse_list.currentTextChanged.connect(self._on_reuse_selected)
+
+        keyword_row = QHBoxLayout()
+        keyword_row.addWidget(self.keyword_edit)
+        keyword_row.addWidget(self.use_crawling_checkbox)
+        keyword_row.addWidget(self.crawl_count_spin)
+
+        reuse_row = QHBoxLayout()
+        reuse_row.addWidget(self.reuse_search_button)
+        reuse_row.addWidget(self.reuse_clear_button)
+        reuse_row.addWidget(self.reuse_status_label)
+
+        image_header_row = QHBoxLayout()
+        image_header_row.addWidget(QLabel("이미지"))
+        image_header_row.addStretch()
+        image_header_row.addWidget(self.clear_images_button)
+
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
+
+        self.login_status_label = QLabel("")
+
+        account_row = QHBoxLayout()
+        account_row.addWidget(QLabel("발행 계정"))
+        account_row.addWidget(self.account_combo)
+        account_row.addWidget(self.account_manage_button)
+        account_row.addWidget(QLabel("로그인 계정"))
+        account_row.addWidget(self.login_account_combo)
+        account_row.addWidget(self.login_button)
+        account_row.addWidget(self.logout_button)
+        account_row.addWidget(self.login_status_label)
+        account_row.addStretch()
+
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addWidget(self.search_button)
+        search_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(QLabel("AGENTS.md"))
+        agents_md_row.addWidget(self.agents_md_combo, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(keyword_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(input_defaults.review_draft)
+        self.review_draft_checkbox.toggled.connect(self._save_input_defaults)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 로그인된 Chrome에서 임시저장합니다. 최종 발행은 네이버에서 직접 진행하세요.")
+        layout.addWidget(self.review_draft_checkbox)
+        layout.addLayout(ai_model_row)
+        layout.addLayout(account_row)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addWidget(self.search_status_label)
+        layout.addLayout(agents_md_row)
+        layout.addLayout(reuse_row)
+        layout.addWidget(self.reuse_list)
+        layout.addWidget(self.comment_edit)
+        layout.addLayout(image_header_row)
+        layout.addWidget(self.image_drop_list)
+
+    def _on_search_existing(self) -> None:
+        dirs = config.find_existing_work_dirs(self.keyword_edit.text())
+        self.reuse_list.clear()
+        self._found_reuse_dirs = {d.name: d for d in dirs}
+        if not dirs:
+            self.reuse_status_label.setText("재사용: 기존 데이터 없음")
+            return
+        self.reuse_list.addItems(list(self._found_reuse_dirs.keys()))
+        self.reuse_status_label.setText(f"재사용: {len(dirs)}개 발견 — 목록에서 선택하세요")
+
+    def _on_reuse_selected(self, folder_name: str) -> None:
+        if not folder_name:
+            return
+        self.selected_reuse_dir = self._found_reuse_dirs.get(folder_name)
+        self.reuse_status_label.setText(f"재사용 선택됨: {folder_name} (크롤링/이미지 건너뜀)")
+        self.use_crawling_checkbox.setEnabled(False)
+        self.image_drop_list.setEnabled(False)
+
+    def _on_reuse_cleared(self) -> None:
+        self.selected_reuse_dir = None
+        self.reuse_list.clearSelection()
+        self.reuse_status_label.setText("재사용: 사용 안 함")
+        self.use_crawling_checkbox.setEnabled(True)
+        self.image_drop_list.setEnabled(True)
+
+    def _on_clear_images(self) -> None:
+        self.image_drop_list.clear_images()
+
+    def _on_agents_md_selected(self, _index: int) -> None:
+        self.agents_md_path = self.agents_md_combo.currentData()
+        self._save_input_defaults()
+
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        """"AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청)."""
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+        self.search_download_checkbox.setEnabled(checked)
+        self.search_timing_before_radio.setEnabled(checked)
+        self.search_timing_after_radio.setEnabled(checked)
+        self._update_search_button_enabled()
+        self._save_input_defaults()
+
+    def _on_search_timing_changed(self, _checked: bool) -> None:
+        self._update_search_button_enabled()
+        self._save_input_defaults()
+
+    def _update_search_button_enabled(self) -> None:
+        """검색 버튼은 "글쓰기 전" 시점에서만 쓴다 — "글쓰기 후"는 파이프라인 실행 중
+        자동으로 검색되므로 미리 누를 필요가 없다."""
+        self.search_button.setEnabled(
+            self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+        )
+
+    def _on_search_images_clicked(self) -> None:
+        """키워드로 즉시 검색·다운로드해서 결과를 image_drop_list에 추가한다("글쓰기 전" 전용).
+
+        이후 흐름(참고 이미지로 AI에 전달, work_dir/images로 복사)은 사용자가 직접 드래그
+        드롭한 이미지와 완전히 동일한 기존 경로를 그대로 탄다.
+        """
+        keyword = self.keyword_edit.text().strip()
+        if not keyword:
+            self.search_status_label.setText("이미지 검색: 키워드를 먼저 입력하세요")
+            return
+
+        count = self.image_gen_count_spin.value()
+        self.search_button.setEnabled(False)
+        self.search_button.setText("검색 중…")
+        QApplication.processEvents()
+        try:
+            saved_paths = image_search.download_search_images(keyword, count)
+        finally:
+            self.search_button.setText("이미지 검색")
+            self._update_search_button_enabled()
+
+        if not saved_paths:
+            self.search_status_label.setText(f"이미지 검색: '{keyword}' 결과 없음")
+            return
+
+        for path in saved_paths:
+            self.image_drop_list.add_image(str(path))
+        self.search_status_label.setText(f"이미지 검색: {len(saved_paths)}장 추가됨")
+
+    def _on_manage_accounts_clicked(self) -> None:
+        """계정 관리 다이얼로그를 열고, 작업용 콤보(account_combo)와 로그인 대상 콤보
+        (login_account_combo)를 모두 최신 계정 정보로 다시 채운다."""
+        _open_account_manager(self, self.account_combo)
+        _populate_account_combo(self.login_account_combo, self.login_account_combo.currentData(), enabled=True)
+
+    def _on_login_clicked(self) -> None:
+        """작업을 만들지 않고도 login_account_combo에서 고른 계정으로 미리 로그인만
+        마친다(사용자 요청 — 각 작업(태스크)에 설정된 계정 정보는 쓰지 않고, 로그인
+        버튼 옆에서 로그인할 아이디를 별도로 선택한다).
+
+        PreloginWorker가 headed 크롬을 띄우고(CAPTCHA/2FA 등은 그 크롬 창에서 수동으로
+        처리), 성공하면 세션 파일이 저장된다 — 이후 같은 계정으로 "대기열에 추가"한
+        글쓰기 작업들은 발행 단계(run_publish)에서 이미 로그인된 세션을 그대로
+        재사용하므로 재로그인 없이 이어서 발행된다(작업 시작 시 자동 사전 로그인은
+        더 이상 하지 않는다 — 발행 시점에만 로그인).
+        """
+        if self._prelogin_worker is not None and self._prelogin_worker.isRunning():
+            self.login_status_label.setText("로그인: 이미 진행 중입니다")
+            return
+        account_id = self.login_account_combo.currentData()
+        self.login_button.setEnabled(False)
+        self.logout_button.setEnabled(False)
+        self.login_status_label.setText("로그인: 크롬 실행 중… (필요 시 크롬 창에서 직접 인증)")
+        worker = PreloginWorker(account_id, self)
+        worker.finished_signal.connect(self._on_login_finished)
+        worker.progress.connect(self.login_status_label.setText)
+        self._prelogin_worker = worker
+        worker.start()
+
+    def _on_logout_clicked(self):
+        if self._prelogin_worker is not None and self._prelogin_worker.isRunning():
+            return
+        self.login_button.setEnabled(False)
+        self.logout_button.setEnabled(False)
+        self.login_status_label.setText("로그아웃 확인 중…")
+        worker = PreloginWorker(None, self, logout=True)
+        worker.finished_signal.connect(self._on_login_finished)
+        worker.progress.connect(self.login_status_label.setText)
+        self._prelogin_worker = worker
+        worker.start()
+
+    def prelogin_worker(self) -> "PreloginWorker | None":
+        """현재 실행 중인 로그인 워커(창 닫기 시 확인/wait()용)."""
+        return self._prelogin_worker
+
+    def _on_login_finished(self, success: bool) -> None:
+        self.login_button.setEnabled(True)
+        self.logout_button.setEnabled(True)
+        if getattr(self._prelogin_worker, "logout", False):
+            if success:
+                self.login_status_label.setText("네이버 로그아웃됨 — 로그인 버튼으로 다른 ID로 로그인할 수 있습니다.")
+            else:
+                self.login_status_label.setText("로그아웃 확인 실패: " + self.login_status_label.text())
+            return
+        account_label = pipeline.account_label(self.login_account_combo.currentData())
+        if success:
+            self.login_status_label.setText("로그인: 인증 완료 (단일 발행 프로필)")
+        else:
+            self.login_status_label.setText("로그인 확인 실패: " + self.login_status_label.text())
+
+    def _save_input_defaults(self) -> None:
+        """AI 이미지 생성/이미지 검색 사용 여부·개수, 커스텀 AGENTS.md 경로를 바꿀 때마다
+        즉시 input_defaults.json에 저장해 다음 앱 실행에도 같은 값으로 시작하게 한다."""
+        pipeline.save_input_defaults(
+            pipeline.InputDefaults(
+                review_draft=self.review_draft_checkbox.isChecked(),
+                generate_images=self.generate_images_checkbox.isChecked(),
+                image_gen_count=self.image_gen_count_spin.value(),
+                search_images=self.search_images_checkbox.isChecked(),
+                search_images_download=self.search_download_checkbox.isChecked(),
+                search_images_timing="after" if self.search_timing_after_radio.isChecked() else "before",
+                crawl_count=self.crawl_count_spin.value(),
+                agents_md_path=self.agents_md_path,
+                ai_model=self.ai_model_combo.currentData(),
+                account_id=self.account_combo.currentData(),
+            )
+        )
+
+    def to_pipeline_context(self) -> PipelineContext:
+        """현재 입력 탭의 값으로 PipelineContext를 생성한다.
+
+        이미지 0장·코멘트 빈 값이어도 예외 없이 반환된다(PRD 4.1 완료조건).
+        work_dir/step_status는 파이프라인 실행 시점에 결정되므로 기본값을 그대로 둔다.
+        """
+        return PipelineContext(
+            keyword=self.keyword_edit.text(),
+            comment=self.comment_edit.toPlainText(),
+            image_paths=list(self.image_drop_list.image_paths),
+            use_crawling=self.use_crawling_checkbox.isChecked(),
+            crawl_count=self.crawl_count_spin.value(),
+            generate_images=self.generate_images_checkbox.isChecked(),
+            image_gen_count=self.image_gen_count_spin.value(),
+            search_images=self.search_images_checkbox.isChecked(),
+            search_images_download=self.search_download_checkbox.isChecked(),
+            search_images_timing="after" if self.search_timing_after_radio.isChecked() else "before",
+            agents_md_path=self.agents_md_path,
+            review_draft=self.review_draft_checkbox.isChecked(),
+            reuse_work_dir=self.selected_reuse_dir,
+            ai_model=self.ai_model_combo.currentData(),
+            account_id=self.account_combo.currentData(),
+        )
+
+
+class TaskEditDialog(QDialog):
+    """저장된 태스크(TaskItem) 하나를 새로 만들거나 편집하는 다이얼로그.
+
+    InputTab과 같은 필드 구성(키워드/코멘트/크롤링 사용/AI 이미지 생성/수동 로그인 +
+    이미지 목록)을 쓰되, "즉시 실행"이 아니라 "저장"이 목적이라는 점이 다르다. 태스크는
+    reuse_work_dir(기존 크롤링 데이터 재사용)을 갖지 않는다 — 그 기능은 입력 탭 전용
+    흐름이라 이번 범위에서는 뺐다(태스크로 만든 작업은 항상 새 작업 폴더로 실행됨).
+    """
+
+    def __init__(self, task: TaskItem | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("일반 태스크 편집" if task is not None else "새 일반 태스크")
+        self._task_id = task.task_id if task is not None else pipeline.new_task_id()
+
+        self.label_edit = QLineEdit(task.label if task is not None else "")
+        self.label_edit.setPlaceholderText("태스크 이름(비우면 키워드로 자동 표시)")
+
+        self.keyword_edit = QLineEdit(task.keyword if task is not None else "")
+        self.keyword_edit.setPlaceholderText("키워드")
+
+        self.bulk_mode_checkbox = QCheckBox("여러 키워드 일괄 생성(줄바꿈으로 구분)")
+        self.bulk_mode_checkbox.setVisible(task is None)
+        self.bulk_mode_checkbox.toggled.connect(self._on_bulk_mode_toggled)
+
+        self.bulk_keyword_edit = QTextEdit()
+        self.bulk_keyword_edit.setPlaceholderText("한 줄에 키워드 하나씩 입력")
+        self.bulk_keyword_edit.setFixedHeight(self.bulk_keyword_edit.fontMetrics().lineSpacing() * 5 + 16)
+        self.bulk_keyword_edit.setVisible(False)
+
+        self.use_crawling_checkbox = QCheckBox("크롤링 사용")
+        self.use_crawling_checkbox.setChecked(task.use_crawling if task is not None else True)
+
+        crawl_count_defaults = pipeline.load_input_defaults()
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(
+            task.crawl_count if task is not None else crawl_count_defaults.crawl_count
+        )
+        self.crawl_count_spin.setSuffix("건")
+        self.crawl_count_spin.setEnabled(self.use_crawling_checkbox.isChecked())
+        self.use_crawling_checkbox.toggled.connect(self.crawl_count_spin.setEnabled)
+        self.crawl_count_spin.valueChanged.connect(self._save_image_defaults)
+
+        # 새 태스크를 만들 때는(task is None) 직전에 저장했던 값을 기본값으로 띄운다 —
+        # AI 실행기/모델·발행 계정·이미지 생성 설정을 매번 다시 고르는 게 번거롭다는
+        # 요청(사용자 확인). InputTab과 같은 input_defaults.json을 공유해서 "마지막으로
+        # 쓴 값" 하나로 통일한다. 태스크 편집(task is not None)은 그 태스크 자신의 저장된
+        # 값을 그대로 쓴다 — 기존 동작 유지.
+        image_defaults = pipeline.load_input_defaults()
+
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(task.ai_model if task is not None else image_defaults.ai_model))
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.ai_model_combo.currentIndexChanged.connect(self._save_image_defaults)
+
+        self.account_combo = QComboBox()
+        _populate_account_combo(
+            self.account_combo,
+            task.account_id if task is not None else image_defaults.account_id,
+            enabled=True,
+        )
+        self.account_combo.currentIndexChanged.connect(self._save_image_defaults)
+        self.account_manage_button = QPushButton("계정 관리…")
+        self.account_manage_button.clicked.connect(lambda: _open_account_manager(self, self.account_combo))
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(
+            task.generate_images if task is not None else image_defaults.generate_images
+        )
+
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(
+            task.image_gen_count if task is not None else image_defaults.image_gen_count
+        )
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.generate_images_checkbox.toggled.connect(self._save_image_defaults)
+        self.image_gen_count_spin.valueChanged.connect(self._save_image_defaults)
+
+        # "AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(InputTab과 동일 규칙).
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(
+            task.search_images if task is not None else image_defaults.search_images
+        )
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setToolTip(
+            "체크 해제 시 \"글쓰기 후\"에서는 원격 URL을 그대로 사용합니다(\"글쓰기 전\"은 로컬 파일이 "
+            "필요해 항상 다운로드합니다)."
+        )
+        self.search_download_checkbox.setChecked(
+            task.search_images_download if task is not None else image_defaults.search_images_download
+        )
+        self.search_download_checkbox.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_download_checkbox.toggled.connect(self._save_image_defaults)
+
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        search_timing = task.search_images_timing if task is not None else image_defaults.search_images_timing
+        if search_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_timing_after_radio.setEnabled(self.search_images_checkbox.isChecked())
+        self.search_timing_before_radio.toggled.connect(self._on_search_timing_changed)
+        self.search_timing_after_radio.toggled.connect(self._save_image_defaults)
+
+        self.search_button = QPushButton("이미지 검색")
+        self.search_button.clicked.connect(self._on_search_images_clicked)
+        self.search_button.setEnabled(
+            self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+        )
+
+        self.search_status_label = QLabel("")
+
+        self.agents_md_path: str | None = task.agents_md_path if task is not None else None
+        self.agents_md_combo = QComboBox()
+        _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
+        self.agents_md_combo.currentIndexChanged.connect(self._on_agents_md_selected)
+
+
+        self.comment_edit = QTextEdit(task.comment if task is not None else "")
+        self.comment_edit.setPlaceholderText("comment(선택)")
+        self.comment_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.comment_edit.setFixedHeight(self.comment_edit.fontMetrics().lineSpacing() * 5 + 16)
+
+        self._keyword_manually_edited = task is not None and task.keyword != task.label
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        self.keyword_edit.textEdited.connect(self._on_keyword_edited)
+
+        self.image_drop_list = ImageDropList()
+        if task is not None:
+            self.image_drop_list.load_images(task.image_paths)
+        self.clear_images_button = QPushButton("이미지 초기화")
+        self.clear_images_button.clicked.connect(self.image_drop_list.clear_images)
+
+        image_header_row = QHBoxLayout()
+        image_header_row.addWidget(QLabel("이미지"))
+        image_header_row.addStretch()
+        image_header_row.addWidget(self.clear_images_button)
+
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
+
+        account_row = QHBoxLayout()
+        account_row.addWidget(QLabel("발행 계정"))
+        account_row.addWidget(self.account_combo)
+        account_row.addWidget(self.account_manage_button)
+        account_row.addStretch()
+
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addWidget(self.search_button)
+        search_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(QLabel("AGENTS.md"))
+        agents_md_row.addWidget(self.agents_md_combo, 1)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        if task is None:
+            button_box.button(QDialogButtonBox.StandardButton.Ok).setText("생성하기")
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        mode_hint = QLabel("이미지 수와 작성 지침을 직접 설정하는 일반 작업입니다.\n첫 글 분석으로 자동 설정하려면 ‘스타일 분석 멀티작업’ 탭을 이용하세요.")
+        mode_hint.setWordWrap(True)
+        layout.addWidget(mode_hint)
+        layout.addWidget(QLabel("태스크 이름"))
+        layout.addWidget(self.label_edit)
+        layout.addWidget(QLabel("키워드"))
+        layout.addWidget(self.keyword_edit)
+        layout.addWidget(self.bulk_mode_checkbox)
+        layout.addWidget(self.bulk_keyword_edit)
+        crawling_row = QHBoxLayout()
+        crawling_row.addWidget(self.use_crawling_checkbox)
+        crawling_row.addWidget(self.crawl_count_spin)
+        crawling_row.addStretch()
+        layout.addLayout(crawling_row)
+        layout.addLayout(ai_model_row)
+        layout.addLayout(account_row)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addWidget(self.search_status_label)
+        layout.addLayout(agents_md_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(task.review_draft if task else False)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 로그인된 Chrome에서 임시저장합니다. 최종 발행은 네이버에서 직접 진행하세요.")
+        layout.addWidget(self.review_draft_checkbox)
+        layout.addWidget(self.comment_edit)
+        layout.addLayout(image_header_row)
+        layout.addWidget(self.image_drop_list)
+        layout.addWidget(button_box)
+        self.resize(480, 620)
+
+    def _on_bulk_mode_toggled(self, checked: bool) -> None:
+        self.keyword_edit.setVisible(not checked)
+        self.bulk_keyword_edit.setVisible(checked)
+        self.label_edit.setDisabled(checked)
+        self.label_edit.setPlaceholderText(
+            "일괄 생성 시 각 태스크 이름은 키워드로 자동 지정됩니다" if checked
+            else "태스크 이름(비우면 키워드로 자동 표시)"
+        )
+        # 일괄 생성은 키워드가 여러 개라 어떤 키워드로 검색할지 정할 수 없으므로 버튼을 끈다.
+        self.search_button.setEnabled(not checked and self._search_button_should_be_enabled())
+
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        """"AI 실사 이미지 생성"과 "이미지 검색"은 배타적으로 켠다(사용자 요청)."""
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+        self.search_download_checkbox.setEnabled(checked)
+        self.search_timing_before_radio.setEnabled(checked)
+        self.search_timing_after_radio.setEnabled(checked)
+        self._update_search_button_enabled()
+        self._save_image_defaults()
+
+    def _on_search_timing_changed(self, _checked: bool) -> None:
+        self._update_search_button_enabled()
+        self._save_image_defaults()
+
+    def _search_button_should_be_enabled(self) -> bool:
+        return self.search_images_checkbox.isChecked() and self.search_timing_before_radio.isChecked()
+
+    def _update_search_button_enabled(self) -> None:
+        self.search_button.setEnabled(not self.bulk_mode_checkbox.isChecked() and self._search_button_should_be_enabled())
+
+    def _on_search_images_clicked(self) -> None:
+        """키워드로 즉시 검색·다운로드해서 결과를 image_drop_list에 추가한다("글쓰기 전" 전용)."""
+        keyword = self.keyword_edit.text().strip()
+        if not keyword:
+            self.search_status_label.setText("이미지 검색: 키워드를 먼저 입력하세요")
+            return
+
+        count = self.image_gen_count_spin.value()
+        self.search_button.setEnabled(False)
+        self.search_button.setText("검색 중…")
+        QApplication.processEvents()
+        try:
+            saved_paths = image_search.download_search_images(keyword, count)
+        finally:
+            self.search_button.setText("이미지 검색")
+            self._update_search_button_enabled()
+
+        if not saved_paths:
+            self.search_status_label.setText(f"이미지 검색: '{keyword}' 결과 없음")
+            return
+
+        for path in saved_paths:
+            self.image_drop_list.add_image(str(path))
+        self.search_status_label.setText(f"이미지 검색: {len(saved_paths)}장 추가됨")
+
+    def _bulk_keywords(self) -> list[str]:
+        seen: set[str] = set()
+        keywords: list[str] = []
+        for line in self.bulk_keyword_edit.toPlainText().splitlines():
+            keyword = line.strip()
+            if not keyword or keyword in seen:
+                continue
+            seen.add(keyword)
+            keywords.append(keyword)
+        return keywords
+
+    def _on_accept(self) -> None:
+        if self.bulk_mode_checkbox.isChecked():
+            keywords = self._bulk_keywords()
+            if not keywords:
+                QMessageBox.warning(self, "태스크 편집", "키워드를 한 줄에 하나씩 입력해주세요.")
+                return
+            if len(keywords) > 50:
+                reply = QMessageBox.question(
+                    self,
+                    "태스크 편집",
+                    f"키워드가 {len(keywords)}개입니다. 한 번에 대기열에 추가하시겠습니까?",
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        elif not self.keyword_edit.text().strip():
+            QMessageBox.warning(self, "태스크 편집", "키워드를 입력해주세요.")
+            return
+        self.accept()
+
+    def _on_label_changed(self, text: str) -> None:
+        if self._keyword_manually_edited:
+            return
+        self.keyword_edit.setText(text)
+
+    def _on_keyword_edited(self, _text: str) -> None:
+        self._keyword_manually_edited = True
+
+    def _on_agents_md_selected(self, _index: int) -> None:
+        self.agents_md_path = self.agents_md_combo.currentData()
+
+    def _save_image_defaults(self) -> None:
+        """이미지 생성/검색 사용 여부·장수, AI 실행기/모델, 발행 계정을 input_defaults.json에
+        저장해 다음 "새 태스크"에도 같은 값이 기본으로 뜨게 한다(사용자 요청). agents_md_path
+        등 나머지 필드는 InputTab이 관리하는 값 그대로 보존한다."""
+        defaults = pipeline.load_input_defaults()
+        defaults.generate_images = self.generate_images_checkbox.isChecked()
+        defaults.image_gen_count = self.image_gen_count_spin.value()
+        defaults.search_images = self.search_images_checkbox.isChecked()
+        defaults.search_images_download = self.search_download_checkbox.isChecked()
+        defaults.search_images_timing = "after" if self.search_timing_after_radio.isChecked() else "before"
+        defaults.crawl_count = self.crawl_count_spin.value()
+        defaults.ai_model = self.ai_model_combo.currentData()
+        defaults.account_id = self.account_combo.currentData()
+        pipeline.save_input_defaults(defaults)
+
+    def _shared_task_kwargs(self) -> dict:
+        return {
+            "review_draft": self.review_draft_checkbox.isChecked(),
+            "comment": self.comment_edit.toPlainText(),
+            "image_paths": list(self.image_drop_list.image_paths),
+            "use_crawling": self.use_crawling_checkbox.isChecked(),
+            "crawl_count": self.crawl_count_spin.value(),
+            "generate_images": self.generate_images_checkbox.isChecked(),
+            "image_gen_count": self.image_gen_count_spin.value(),
+            "search_images": self.search_images_checkbox.isChecked(),
+            "search_images_download": self.search_download_checkbox.isChecked(),
+            "search_images_timing": "after" if self.search_timing_after_radio.isChecked() else "before",
+            "agents_md_path": self.agents_md_path,
+            "ai_model": self.ai_model_combo.currentData(),
+            "account_id": self.account_combo.currentData(),
+        }
+
+    def get_task_item(self) -> TaskItem:
+        keyword = self.keyword_edit.text().strip()
+        label = self.label_edit.text().strip() or keyword
+        return TaskItem(task_id=self._task_id, label=label, keyword=keyword, **self._shared_task_kwargs())
+
+    def get_task_items(self) -> list[TaskItem]:
+        """일괄 모드면 키워드마다 별도 TaskItem을, 아니면 단일 TaskItem 1개를 반환한다."""
+        if not self.bulk_mode_checkbox.isChecked():
+            return [self.get_task_item()]
+        shared = self._shared_task_kwargs()
+        return [
+            TaskItem(task_id=pipeline.new_task_id(), label=keyword, keyword=keyword, **shared)
+            for keyword in self._bulk_keywords()
+        ]
+
+
+
+class StyleTaskEditDialog(TaskEditDialog):
+    """스타일 분석 작업은 분석 결과로 이미지 수와 지침을 결정한다."""
+
+    def __init__(self, task: TaskItem | None = None, parent: QWidget | None = None) -> None:
+        QDialog.__init__(self, parent)
+        self.setWindowTitle("스타일 분석 작업 편집" if task else "새 스타일 분석 작업")
+        self._task_id = task.task_id if task else pipeline.new_task_id()
+        self.label_edit = QLineEdit(task.label if task else "")
+        self.keyword_edit = QLineEdit(task.keyword if task else "")
+        self.bulk_mode_checkbox = QCheckBox("여러 키워드 일괄 생성(줄바꿈으로 구분)")
+        self.bulk_mode_checkbox.setVisible(task is None)
+        self.bulk_keyword_edit = QTextEdit()
+        self.bulk_keyword_edit.setPlaceholderText("한 줄에 키워드 하나씩 입력")
+        self.bulk_keyword_edit.setVisible(False)
+        self.bulk_mode_checkbox.toggled.connect(self._on_style_bulk_toggled)
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(task.crawl_count if task else 3)
+        self.crawl_count_spin.setSuffix("건")
+        self.ai_model_combo = QComboBox()
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        for label, value in config.AI_MODEL_CHOICES:
+            if value.startswith("codex:"):
+                self.ai_model_combo.addItem(label, value)
+        if task:
+            idx = self.ai_model_combo.findData(config.resolve_ai_model(task.ai_model))
+            if idx >= 0:
+                self.ai_model_combo.setCurrentIndex(idx)
+        self.account_combo = QComboBox()
+        _populate_account_combo(self.account_combo, task.account_id if task else None, enabled=True)
+        self.account_manage_button = QPushButton("계정 관리…")
+        self.account_manage_button.clicked.connect(lambda: _open_account_manager(self, self.account_combo))
+        self.comment_edit = QTextEdit(task.comment if task else "")
+        self.comment_edit.setPlaceholderText("추가 요청(선택)")
+        self._keyword_manually_edited = task is not None and task.keyword != task.label
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        self.keyword_edit.textEdited.connect(self._on_keyword_edited)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("저장" if task else "작업 만들기")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        for label, widget in (("태스크 이름", self.label_edit), ("키워드", self.keyword_edit)):
+            layout.addWidget(QLabel(label))
+            layout.addWidget(widget)
+        layout.addWidget(self.bulk_mode_checkbox)
+        layout.addWidget(self.bulk_keyword_edit)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("검색 글 수"))
+        row.addWidget(self.crawl_count_spin)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(QLabel("AI 실행기/모델 (Codex)"))
+        layout.addWidget(self.ai_model_combo)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("발행 계정"))
+        row.addWidget(self.account_combo)
+        row.addWidget(self.account_manage_button)
+        layout.addLayout(row)
+        self.automatic_settings_label = QLabel(
+            "자동 설정\n"
+            "• 크롤링은 항상 사용하며, 첫 번째 검색 글의 말투·분량을 분석합니다.\n"
+            "• AI 이미지 수는 첫 글의 이미지 수에 맞춰 자동 결정합니다 (최대 15장).\n"
+            "• AGENTS.md는 분석 결과로 작업마다 자동 생성합니다.\n"
+            "• 원문을 복사하지 않고, 방문 전 알아보는 관점으로 작성합니다."
+        )
+        self.automatic_settings_label.setWordWrap(True)
+        layout.addWidget(self.automatic_settings_label)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(task.review_draft if task else False)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 로그인된 Chrome에서 임시저장합니다. 최종 발행은 네이버에서 직접 진행하세요.")
+        layout.addWidget(self.review_draft_checkbox)
+        layout.addWidget(self.comment_edit)
+        layout.addWidget(buttons)
+        self.resize(480, 480)
+
+    def _on_style_bulk_toggled(self, checked: bool) -> None:
+        self.keyword_edit.setVisible(not checked)
+        self.bulk_keyword_edit.setVisible(checked)
+        self.label_edit.setDisabled(checked)
+
+    def _shared_task_kwargs(self) -> dict:
+        return {
+            "review_draft": self.review_draft_checkbox.isChecked(),
+            "comment": self.comment_edit.toPlainText(),
+            "crawl_count": self.crawl_count_spin.value(),
+            "ai_model": self.ai_model_combo.currentData(),
+            "account_id": self.account_combo.currentData(),
+        }
+
+    def get_task_item(self):
+        from style_multitask.models import StyleTaskItem
+        keyword = self.keyword_edit.text().strip()
+        return StyleTaskItem(task_id=self._task_id, label=self.label_edit.text().strip() or keyword,
+                             keyword=keyword, **self._shared_task_kwargs())
+
+    def get_task_items(self):
+        from style_multitask.models import StyleTaskItem
+        if not self.bulk_mode_checkbox.isChecked():
+            return [self.get_task_item()]
+        return [StyleTaskItem(task_id=pipeline.new_task_id(), label=keyword, keyword=keyword,
+                              **self._shared_task_kwargs()) for keyword in self._bulk_keywords()]
+
+class BulkQueueEditDialog(QDialog):
+    """대기열에 있는 여러 작업의 공통 설정을 한 번에 바꾸는 다이얼로그(사용자 요청).
+
+    키워드/코멘트/이미지 목록처럼 작업마다 다른 값은 다루지 않는다 — 크롤링 사용 여부,
+    AI 모델, AI 실사 이미지 생성, 이미지 검색, AGENTS.md, 로그인 모드만 대상이다.
+    초기값은 선택된 작업 중 첫 번째 것으로 채우고, 확인을 누르면 선택된 모든 작업에
+    이 설정을 그대로 덮어쓴다(부분 적용이 아니라 전체 값 교체).
+    """
+
+    def __init__(self, seed: PipelineContext, count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"선택한 {count}개 작업 일괄 설정 변경")
+
+        self.use_crawling_checkbox = QCheckBox("크롤링 사용")
+        self.use_crawling_checkbox.setChecked(seed.use_crawling)
+        self.crawl_count_spin = QSpinBox()
+        self.crawl_count_spin.setRange(1, 100)
+        self.crawl_count_spin.setValue(seed.crawl_count)
+        self.crawl_count_spin.setSuffix("건")
+        self.crawl_count_spin.setEnabled(self.use_crawling_checkbox.isChecked())
+        self.use_crawling_checkbox.toggled.connect(self.crawl_count_spin.setEnabled)
+
+        self.ai_model_combo = QComboBox()
+        for label, value in config.AI_MODEL_CHOICES:
+            self.ai_model_combo.addItem(label, value)
+        self.ai_model_combo.setToolTip(config.AI_MODEL_HELP)
+        idx = self.ai_model_combo.findData(config.resolve_ai_model(seed.ai_model))
+        self.ai_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        # 일괄 설정 변경 다이얼로그는 선택한 여러 대기 작업의 발행 계정을 한 번에 바꿔
+        # 넣기 위한 화면이라, 다른 곳(작업 편집 등)과 달리 계정 콤보를 사용자가 직접
+        # 고를 수 있게 열어 둔다(사용자 요청).
+        self.account_combo = QComboBox()
+        _populate_account_combo(self.account_combo, seed.account_id, enabled=True)
+        self.account_manage_button = QPushButton("계정 관리…")
+        self.account_manage_button.clicked.connect(self._on_manage_accounts_clicked)
+
+        self.generate_images_checkbox = QCheckBox("AI 실사 이미지 생성(블로그 글 작성 후 위임)")
+        self.generate_images_checkbox.setChecked(seed.generate_images)
+        self.image_gen_count_spin = QSpinBox()
+        self.image_gen_count_spin.setRange(1, 10)
+        self.image_gen_count_spin.setValue(seed.image_gen_count)
+        self.image_gen_count_spin.setSuffix("장")
+        self.image_gen_count_spin.setEnabled(self.generate_images_checkbox.isChecked())
+        self.generate_images_checkbox.toggled.connect(self.image_gen_count_spin.setEnabled)
+        self.generate_images_checkbox.toggled.connect(self._on_generate_images_toggled)
+
+        self.search_images_checkbox = QCheckBox("이미지 검색(키워드 기반 API)")
+        self.search_images_checkbox.setChecked(seed.search_images)
+        self.search_download_checkbox = QCheckBox("다운로드")
+        self.search_download_checkbox.setChecked(seed.search_images_download)
+        self.search_download_checkbox.setEnabled(seed.search_images)
+        self.search_timing_before_radio = QRadioButton("글쓰기 전")
+        self.search_timing_after_radio = QRadioButton("글쓰기 후")
+        self.search_timing_group = QButtonGroup(self)
+        self.search_timing_group.addButton(self.search_timing_before_radio)
+        self.search_timing_group.addButton(self.search_timing_after_radio)
+        if seed.search_images_timing == "after":
+            self.search_timing_after_radio.setChecked(True)
+        else:
+            self.search_timing_before_radio.setChecked(True)
+        self.search_timing_before_radio.setEnabled(seed.search_images)
+        self.search_timing_after_radio.setEnabled(seed.search_images)
+        self.search_images_checkbox.toggled.connect(self.search_download_checkbox.setEnabled)
+        self.search_images_checkbox.toggled.connect(self.search_timing_before_radio.setEnabled)
+        self.search_images_checkbox.toggled.connect(self.search_timing_after_radio.setEnabled)
+        self.search_images_checkbox.toggled.connect(self._on_search_images_toggled)
+
+        self.agents_md_path: str | None = seed.agents_md_path
+        self.agents_md_combo = QComboBox()
+        _populate_agents_md_combo(self.agents_md_combo, self.agents_md_path)
+        self.agents_md_combo.currentIndexChanged.connect(self._on_agents_md_selected)
+
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+
+        crawling_row = QHBoxLayout()
+        crawling_row.addWidget(self.use_crawling_checkbox)
+        crawling_row.addWidget(self.crawl_count_spin)
+        crawling_row.addStretch()
+
+        ai_model_row = QHBoxLayout()
+        ai_model_row.addWidget(QLabel("AI 실행기/모델"))
+        ai_model_row.addWidget(self.ai_model_combo)
+        ai_model_row.addStretch()
+
+        account_row = QHBoxLayout()
+        account_row.addWidget(QLabel("발행 계정"))
+        account_row.addWidget(self.account_combo)
+        account_row.addWidget(self.account_manage_button)
+        account_row.addStretch()
+
+        generate_images_row = QHBoxLayout()
+        generate_images_row.addWidget(self.generate_images_checkbox)
+        generate_images_row.addWidget(self.image_gen_count_spin)
+        generate_images_row.addStretch()
+
+        search_images_row = QHBoxLayout()
+        search_images_row.addWidget(self.search_images_checkbox)
+        search_images_row.addWidget(self.search_download_checkbox)
+        search_images_row.addWidget(self.search_timing_before_radio)
+        search_images_row.addWidget(self.search_timing_after_radio)
+        search_images_row.addStretch()
+
+        agents_md_row = QHBoxLayout()
+        agents_md_row.addWidget(QLabel("AGENTS.md"))
+        agents_md_row.addWidget(self.agents_md_combo, 1)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"선택한 {count}개 대기 작업에 공통으로 적용합니다.\n"
+                "(키워드/코멘트/이미지 목록은 각 작업의 값을 그대로 유지합니다)"
+            )
+        )
+        layout.addLayout(crawling_row)
+        layout.addLayout(ai_model_row)
+        layout.addLayout(account_row)
+        layout.addLayout(generate_images_row)
+        layout.addLayout(search_images_row)
+        layout.addLayout(agents_md_row)
+        self.review_draft_checkbox = QCheckBox("네이버 전송 전 초안 검토")
+        self.review_draft_checkbox.setChecked(seed.review_draft)
+        self.review_draft_checkbox.setToolTip("AI가 작성한 MD를 그대로 열고, 확인 후 로그인된 Chrome에서 임시저장합니다. 최종 발행은 네이버에서 직접 진행하세요.")
+        layout.addWidget(self.review_draft_checkbox)
+        layout.addWidget(button_box)
+        self.resize(440, 320)
+
+    def _on_generate_images_toggled(self, checked: bool) -> None:
+        if checked and self.search_images_checkbox.isChecked():
+            self.search_images_checkbox.setChecked(False)
+
+    def _on_search_images_toggled(self, checked: bool) -> None:
+        if checked and self.generate_images_checkbox.isChecked():
+            self.generate_images_checkbox.setChecked(False)
+
+    def _on_agents_md_selected(self, _index: int) -> None:
+        self.agents_md_path = self.agents_md_combo.currentData()
+
+    def _on_manage_accounts_clicked(self) -> None:
+        """계정 관리 다이얼로그를 연 뒤, 이 다이얼로그의 계정 콤보를 최신 계정 정보로
+        다시 채운다 — _open_account_manager 기본 동작(enabled=False)과 달리 여기서는
+        계속 직접 선택 가능한 상태를 유지해야 한다."""
+        current = self.account_combo.currentData()
+        AccountManagerDialog(self).exec()
+        _populate_account_combo(self.account_combo, current, enabled=True)
+
+    def apply_to(self, context: PipelineContext) -> PipelineContext:
+        """context의 키워드/코멘트/이미지/재사용 정보는 그대로 두고 공통 설정만 갈아 끼운다."""
+        context.use_crawling = self.use_crawling_checkbox.isChecked()
+        context.crawl_count = self.crawl_count_spin.value()
+        context.ai_model = self.ai_model_combo.currentData()
+        context.account_id = self.account_combo.currentData()
+        context.review_draft = self.review_draft_checkbox.isChecked()
+        context.generate_images = self.generate_images_checkbox.isChecked()
+        context.image_gen_count = self.image_gen_count_spin.value()
+        context.search_images = self.search_images_checkbox.isChecked()
+        context.search_images_download = self.search_download_checkbox.isChecked()
+        context.search_images_timing = "after" if self.search_timing_after_radio.isChecked() else "before"
+        context.agents_md_path = self.agents_md_path
+        return context
+
+
+class AgentsEditorTab(QWidget):
+    """agents/ 폴더의 AGENTS.md 템플릿을 골라 조회·편집·저장·취소할 수 있는 탭.
+
+    저장은 "저장" 버튼을 명시적으로 눌렀을 때만 수행한다(자동 저장 없음).
+    AGENTS.md의 문체/폴더 규칙 등 내용 자체는 이 탭이 파싱·재구성하지 않고,
+    사용자가 입력한 텍스트를 그대로 저장한다. 입력 탭/태스크 편집의 agents_md_combo와
+    같은 방식으로 agents/ 폴더의 파일명을 나열해 고르게 한다(사용자 요청).
+    """
+
+    file_created = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.agents_file_combo = QComboBox()
+        self._refresh_agents_file_choices()
+        self.agents_file_combo.currentIndexChanged.connect(self._on_agents_file_selected)
+
+        self._current_path: Path = Path(self.agents_file_combo.currentData())
+        self._original_content = agents_editor.load_agents_md(self._current_path)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(self._original_content)
+
+        self.save_button = QPushButton("저장")
+        self.cancel_button = QPushButton("취소")
+        self.save_button.clicked.connect(self._on_save)
+        self.cancel_button.clicked.connect(self._on_cancel)
+
+        combo_row = QHBoxLayout()
+        combo_row.addWidget(QLabel("AGENTS.md 파일"))
+        combo_row.addWidget(self.agents_file_combo, 1)
+        self.new_button = QPushButton("새로 만들기")
+        self.new_button.clicked.connect(self._on_new)
+        combo_row.addWidget(self.new_button)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.save_button)
+        button_row.addWidget(self.cancel_button)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(combo_row)
+        layout.addWidget(self.text_edit)
+        layout.addLayout(button_row)
+
+    def _refresh_agents_file_choices(self) -> None:
+        """agents/ 폴더의 *.md 파일 전체를 이름순으로 나열한다(기본 AGENTS.md 포함).
+
+        입력 탭의 agents_md_combo(_populate_agents_md_combo)와 달리 여기서는 "기본값"
+        플레이스홀더 항목이 필요 없다 — 편집 대상은 항상 구체적인 파일 경로여야 하므로
+        agents/AGENTS.md 자체도 목록에 그대로 넣는다.
+        """
+        self.agents_file_combo.blockSignals(True)
+        self.agents_file_combo.clear()
+        for md_file in config.list_agents_md_files():
+            self.agents_file_combo.addItem(md_file.stem, str(md_file))
+        if self.agents_file_combo.count() == 0:
+            self.agents_file_combo.addItem(config.AGENTS_MD_PATH.stem, str(config.AGENTS_MD_PATH))
+        self.agents_file_combo.blockSignals(False)
+
+    def _select_combo_path(self, path: Path) -> None:
+        idx = self.agents_file_combo.findData(str(path))
+        self.agents_file_combo.blockSignals(True)
+        self.agents_file_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.agents_file_combo.blockSignals(False)
+
+    def _on_agents_file_selected(self, _index: int) -> None:
+        new_path = Path(self.agents_file_combo.currentData())
+        if self.text_edit.toPlainText() != self._original_content:
+            reply = QMessageBox.question(
+                self,
+                "AGENTS.md 편집",
+                "저장하지 않은 변경사항이 있습니다. 무시하고 다른 파일로 전환할까요?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._select_combo_path(self._current_path)
+                return
+        self._current_path = new_path
+        self._original_content = agents_editor.load_agents_md(new_path)
+        self.text_edit.setPlainText(self._original_content)
+
+    def _on_save(self) -> None:
+        content = self.text_edit.toPlainText()
+        agents_editor.save_agents_md(content, self._current_path)
+        self._original_content = content
+
+    def _on_new(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self, "AGENTS.md 새로 만들기", "파일 이름 (.md는 자동으로 붙습니다):"
+        )
+        if not accepted:
+            return
+        if self.text_edit.toPlainText() != self._original_content:
+            reply = QMessageBox.question(
+                self, "AGENTS.md 새로 만들기",
+                "저장하지 않은 변경사항이 있습니다. 무시하고 새 파일로 전환할까요?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            path = agents_editor.create_agents_md(name)
+        except FileExistsError:
+            QMessageBox.warning(self, "생성 실패", "같은 이름의 파일이 이미 있습니다. 다른 이름을 입력해 주세요.")
+            return
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "생성 실패", str(exc))
+            return
+        self._refresh_agents_file_choices()
+        self._select_combo_path(path)
+        self._current_path = path
+        self._original_content = ""
+        self.text_edit.clear()
+        self.text_edit.setFocus()
+        self.file_created.emit()
+
+    def _on_cancel(self) -> None:
+        self.text_edit.setPlainText(self._original_content)
+
+
+class DraftReviewTab(QWidget):
+    """AI가 저장한 Markdown을 그대로 열고 검토 후 전송을 재개한다."""
+
+    review_approved = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker = None
+        self.path = None
+        self._review_owner = None
+        self._publishing = False
+        self._recovery_path = None
+        self._saved_content = ""
+        self._loading_draft = False
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.setInterval(400)
+        self._recovery_timer.timeout.connect(self._write_recovery)
+        self.status_label = QLabel("검토할 초안이 없습니다.")
+        self.path_label = QLabel("")
+        self.path_label.setWordWrap(True)
+        self.text_edit = QTextEdit()
+        self.preview = QTextBrowser()
+        self.preview.setOpenExternalLinks(False)
+        self.preview.setOpenLinks(False)
+        self.text_edit.textChanged.connect(self._refresh_preview)
+        self.save_button = QPushButton("MD 저장")
+        self.send_button = QPushButton("저장 후 네이버 임시저장")
+        self.cancel_button = QPushButton("이 작업 전송 취소")
+        self.save_button.clicked.connect(self._save)
+        self.send_button.clicked.connect(self._send)
+        self.cancel_button.clicked.connect(self._cancel)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        for title, widget in (("Markdown 편집", self.text_edit), ("미리보기", self.preview)):
+            panel = QWidget()
+            panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            column = QVBoxLayout(panel)
+            column.addWidget(QLabel(title))
+            column.addWidget(widget, 1)
+            splitter.addWidget(panel)
+        splitter.setSizes([500, 500])
+        row = QHBoxLayout()
+        for button in (self.cancel_button, self.save_button, self.send_button):
+            row.addWidget(button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.path_label)
+        layout.addWidget(splitter, 1)
+        layout.addWidget(QLabel("미리보기는 제목·본문·이미지 확인용이며 네이버 편집기와 차이가 있을 수 있습니다."))
+        layout.addLayout(row)
+        self._set_active(False)
+
+    def _set_active(self, active):
+        editable = self.path is not None and not self._publishing
+        self.text_edit.setReadOnly(not editable)
+        self.save_button.setEnabled(editable)
+        self.send_button.setEnabled(active)
+        self.cancel_button.setEnabled(active)
+
+    def open_draft(self, worker, path):
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "초안 열기 실패", str(exc))
+            worker.resolve_review(False)
+            return
+        self.worker, self.path = worker, Path(path)
+        self._review_owner = worker
+        self._publishing = False
+        self._recovery_timer.stop()
+        self._recovery_path = None
+        self._saved_content = content
+        context = getattr(worker, 'context', None)
+        if (context is not None and context.work_dir is not None and isinstance(context.checkpoint_id, str)
+                and re.fullmatch(r'[0-9a-f]{32}', context.checkpoint_id)
+                and self.path.resolve().is_relative_to(Path(context.work_dir).resolve())):
+            self._recovery_path = Path(context.work_dir) / f'.draft-recovery-{context.checkpoint_id}.json'
+        recovered = False
+        if self._recovery_path is not None and self._recovery_path.is_file():
+            try:
+                recovery = json.loads(self._recovery_path.read_text(encoding='utf-8'))
+                relative_draft = self.path.resolve().relative_to(Path(context.work_dir).resolve()).as_posix()
+                same_draft = (recovery.get('draft_relative') == relative_draft or
+                              recovery.get('draft') == str(self.path.resolve())) if isinstance(recovery, dict) else False
+                if isinstance(recovery, dict) and recovery.get('dirty') is True and same_draft and isinstance(recovery.get('text'), str):
+                    content = recovery['text']
+                    recovered = True
+            except (OSError, ValueError, TypeError):
+                logger.warning('초안 편집 복구 파일을 읽지 못했습니다.')
+        self.preview.document().setBaseUrl(QUrl.fromLocalFile(str(self.path.parent.resolve()) + "/"))
+        self._loading_draft = True
+        self.text_edit.setPlainText(content)
+        self._loading_draft = False
+        self.path_label.setText(str(self.path))
+        self.status_label.setText("저장 전 편집 내용 복구 · 원문과 내용을 확인한 뒤 저장하세요." if recovered else "검토 대기 · AI가 작성한 원문입니다. 확인 후 네이버로 보내세요.")
+        self._set_active(True)
+
+    def _refresh_preview(self):
+        self.preview.setMarkdown(self.text_edit.toPlainText())
+        if not self._loading_draft and self._recovery_path is not None and not self._publishing:
+            self._recovery_timer.start()
+        if self.worker:
+            self.status_label.setText("검토 대기 · 수정한 내용은 저장 후 전송됩니다.")
+
+    def _write_recovery(self):
+        if self._recovery_path is None or self.path is None:
+            return
+        text = self.text_edit.toPlainText()
+        work_dir = self._recovery_path.parent.resolve()
+        data = {'draft_relative': self.path.resolve().relative_to(work_dir).as_posix(),
+                'text': text, 'dirty': text != self._saved_content}
+        try:
+            temp = self._recovery_path.with_suffix('.json.tmp')
+            temp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+            temp.replace(self._recovery_path)
+        except OSError:
+            logger.exception('초안 편집 복구 내용을 저장하지 못했습니다.')
+
+    def _save(self):
+        if not self.path or self._publishing:
+            return False
+        try:
+            self.path.write_text(self.text_edit.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "MD 저장 실패", str(exc))
+            return False
+        self._saved_content = self.text_edit.toPlainText()
+        self._recovery_timer.stop()
+        self._write_recovery()
+        self.status_label.setText("MD 저장 완료 · 네이버 전송 전" if self.worker else "MD 저장 완료")
+        return True
+
+    def _send(self):
+        if self.worker and not self.worker.cancel_event.is_set() and self._save():
+            worker = self.worker
+            self.worker = None
+            self._publishing = True
+            self._set_active(False)
+            self.status_label.setText("검토 완료 · 로그인된 Chrome에서 임시저장합니다. 최종 발행은 네이버에서 직접 진행하세요.")
+            self.review_approved.emit(worker)
+            worker.resolve_review(True)
+
+    def save_pending_edits(self) -> bool:
+        if self.path is not None and not self._publishing and self.text_edit.toPlainText() != self._saved_content:
+            return self._save()
+        return True
+
+    def _cancel(self):
+        if self.worker:
+            self.worker.resolve_review(False)
+        self.end_review("전송 취소됨 · 기존 MD 파일은 유지됩니다.")
+
+    def end_review(self, message="작업이 종료되었습니다."):
+        self.worker = None
+        self._review_owner = None
+        self._publishing = False
+        self._set_active(False)
+        self.status_label.setText(message)
+
+    def finish_worker(self, worker):
+        if self._review_owner is worker:
+            self.end_review("작업 종료 · 원문을 수정하고 MD로 저장할 수 있습니다.")
+
+
+class TaskManager(QObject):
+    """저장된 태스크(tasks.json) 목록의 CRUD를 담당한다.
+
+    실행 엔진(JobQueueManager)과는 완전히 별개다 — 태스크는 "대기열에 넣기 전에
+    미리 저장해 둔 정의"일 뿐이고, 실제 실행은 여전히 JobQueueManager.enqueue()가
+    맡는다(MultiTaskTab이 "대기열에 추가" 시 TaskItem.to_pipeline_context()로 변환해
+    넘겨준다). 매 변경(추가/수정/삭제/순서변경)마다 즉시 pipeline.save_tasks()로
+    디스크에 반영하고 changed 시그널을 쏴서 UI가 다시 그리게 한다.
+    """
+
+    changed = Signal()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.tasks: list[TaskItem] = pipeline.load_tasks()
+
+    def add(self, task: TaskItem) -> None:
+        self.tasks.append(task)
+        self._persist()
+
+    def update(self, task_id: str, updated: TaskItem) -> None:
+        for i, t in enumerate(self.tasks):
+            if t.task_id == task_id:
+                self.tasks[i] = updated
+                break
+        self._persist()
+
+    def remove(self, task_id: str) -> None:
+        self.tasks = [t for t in self.tasks if t.task_id != task_id]
+        self._persist()
+
+    def move(self, task_id: str, offset: int) -> None:
+        """선택된 태스크를 목록에서 offset만큼 옮긴다(-1=위로, +1=아래로).
+
+        범위를 벗어나면(맨 위에서 위로, 맨 아래에서 아래로) 조용히 무시한다.
+        """
+        idx = next((i for i, t in enumerate(self.tasks) if t.task_id == task_id), None)
+        if idx is None:
+            return
+        new_idx = idx + offset
+        if not (0 <= new_idx < len(self.tasks)):
+            return
+        self.tasks[idx], self.tasks[new_idx] = self.tasks[new_idx], self.tasks[idx]
+        self._persist()
+
+    def _persist(self) -> None:
+        pipeline.save_tasks(self.tasks)
+        self.changed.emit()
+
+
+class PipelineWorker(QThread):
+    """pipeline.run_pipeline()을 별도 스레드에서 실행해 GUI를 막지 않는 워커.
+
+    파이프라인의 on_step 콜백은 워커 스레드에서 호출되므로, 위젯을 직접 건드리지 않고
+    Qt 시그널로 감싸 메인 스레드에 전달한다(스레드 안전).
+    """
+
+    step_signal = Signal(str, str)
+    finished_signal = Signal(dict)
+    review_requested = Signal(object)
+
+    def __init__(self, context: PipelineContext, parent: QWidget | None = None, *, auto_retry=False) -> None:
+        super().__init__(parent)
+        self.context = context
+        self.auto_retry = auto_retry
+        # 진행 중 작업 삭제 기능(사용자 요청)의 취소 신호. cancel()이 set()하면
+        # pipeline.run_pipeline이 다음 폴링 시점(늦어도 0.5초 이내)에 현재 서브프로세스를
+        # 강제 종료하고 남은 단계를 모두 "canceled"로 표시한다.
+        self.cancel_event = threading.Event()
+        self.review_event = threading.Event()
+        self.review_approved = False
+
+    def request_review(self, path: Path) -> bool:
+        if hasattr(self, 'context'):
+            try:
+                pipeline.save_resume_checkpoint(self.context, path)
+            except (OSError, ValueError):
+                logger.exception("초안 복원 정보를 저장하지 못했습니다.")
+        self.review_approved = False
+        self.review_event.clear()
+        self.review_requested.emit(path)
+        while not self.review_event.wait(0.2):
+            if self.cancel_event.is_set():
+                return False
+        return self.review_approved and not self.cancel_event.is_set()
+
+    def resolve_review(self, approved: bool) -> None:
+        self.review_approved = approved
+        self.review_event.set()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            self._run_with_account()
+        finally:
+            pipeline.clear_account_snapshot()
+
+    def _run_with_account(self) -> None:
+        # Chrome owns the login session. Local generation requires no account.
+        if self.cancel_event.is_set():
+            self.finished_signal.emit({"keyword": self.context.keyword, "steps": {
+                "generate": {"status": "canceled"}, "publish": {"status": "skipped"}}})
+            return
+        self.step_signal.emit("login", "manual")
+        if self.auto_retry:
+            logger.info("기존 초안으로 네이버 임시저장을 자동 재시도합니다.")
+        else:
+            logger.info("글 생성 시작: 계정 확인 없이 진행합니다. 최종 발행은 Chrome의 현재 계정을 사용하세요.")
+        def report_step(name: str, status: str) -> None:
+            # Style runs validate their final root-level Markdown before publish.
+            if self.context.workflow_kind == "style" and name == "publish" and status == "running" and self.context.work_dir:
+                candidates = [p for p in Path(self.context.work_dir).glob('*.md') if p.name.lower() != 'agents.md']
+                if len(candidates) == 1:
+                    try:
+                        pipeline.save_resume_checkpoint(self.context, candidates[0])
+                    except (OSError, ValueError):
+                        logger.exception("스타일 초안 복원 정보를 저장하지 못했습니다.")
+            self.step_signal.emit(name, status)
+
+        resumed = pipeline.resume_completed_draft(
+            self.context, report_step, self.cancel_event, self.request_review, auto_retry=self.auto_retry)
+        if resumed is not None:
+            self.finished_signal.emit(resumed)
+            return
+        if self.context.resume_only:
+            error = "복원 기록에 지정된 초안 파일을 열 수 없습니다. 작업 폴더를 확인하세요."
+            self.finished_signal.emit({"keyword": self.context.keyword,
+                                       "steps": {"publish": {"status": "failed", "error": error}}})
+            return
+        if self.context.resume_work_dir is not None:
+            # An incomplete generation cannot be resumed safely. Start a new
+            # isolated run, leaving all files from the interrupted run intact.
+            logger.info("완성된 초안 복원 지점이 없어 기존 파일을 보존하고 새 작업으로 다시 시작합니다.")
+            self.context.reuse_work_dir = None
+        if self.context.workflow_kind == "style":
+            try:
+                from style_multitask.runner import run_style_pipeline
+                result = run_style_pipeline(
+                    self.context,
+                    on_step=report_step,
+                    cancel_event=self.cancel_event,
+                    **({"on_review": self.request_review} if self.context.review_draft else {}),
+                )
+            except Exception as exc:
+                logging.exception("스타일 작업 실행 실패")
+                result = {"keyword": self.context.keyword, "steps": {
+                    "generate": {"status": "failed", "error": str(exc)},
+                    "publish": {"status": "skipped"},
+                }}
+                self.step_signal.emit("generate", "failed")
+        else:
+            result = pipeline.run_pipeline(
+                self.context,
+                on_step=report_step,
+                cancel_event=self.cancel_event,
+                **({"on_review": self.request_review} if self.context.review_draft else {}),
+            )
+        self.finished_signal.emit(result)
+
+
+class PreloginWorker(QThread):
+    """"로그인" 버튼(사용자 요청)에서 pipeline.run_prelogin()을 별도 스레드로 실행한다.
+
+    작업을 대기열에 넣지 않고도 미리 원하는 계정으로 로그인만 마쳐 둘 수 있게 한다.
+    사용자가 명시적으로 눌렀을 때만 실행되며(작업 시작 시 자동 사전 로그인은 없음),
+    결과(성공/실패)를 finished_signal로 알려 사용자가 로그인 완료 여부를 확인할 수
+    있게 한다. 로그인에 성공하면 세션 파일(config.publisher_session_file)이 갱신되므로,
+    이후 같은 계정으로 큐에 넣는 작업들은 재로그인 없이 그 세션을 이어서 쓴다.
+    """
+
+    finished_signal = Signal(bool)
+    progress = Signal(str)
+
+    def __init__(self, account_id: str | None, parent: QWidget | None = None, *, logout=False) -> None:
+        super().__init__(parent)
+        self.account_id = account_id
+        self.logout = logout
+        self.cancel_event = threading.Event()
+
+    def run(self) -> None:
+        if self.logout:
+            success = pipeline.run_logout(cancel_event=self.cancel_event, on_output=self.progress.emit)
+            self.finished_signal.emit(success)
+            return
+        success = pipeline.run_prelogin(self.account_id, cancel_event=self.cancel_event, interactive=True, on_output=self.progress.emit)
+        self.finished_signal.emit(success)
+
+
+@dataclass
+class QueuedJob:
+    """"전체 실행" 대기열에 들어가는 작업 하나(멀티 작업 탭 표시용)."""
+
+    job_id: int
+    label: str
+    context: PipelineContext
+    status: str = "대기"  # 대기 -> 진행중 -> 완료/실패
+
+
+_PUBLISH_QUEUE_LABELS = {
+    'retry': '초안 준비됨 · 임시저장 재시도',
+    'editor': '작성 탭 확인 · 기존 초안 있음',
+    'unknown': '저장 여부 확인 필요',
+    'saved': '임시저장 완료 · 네이버에서 발행 대기',
+    'missing': '초안 파일 확인 필요',
+}
+
+
+def _job_to_task_item(job: QueuedJob) -> TaskItem:
+    """QueuedJob을 queue_state.json 저장용 TaskItem으로 변환한다.
+
+    PipelineContext의 work_dir/reuse_work_dir(Path, 실행 시점에만 정해짐)는
+    TaskItem에 없는 필드라 자연히 버려진다 — 복원된 작업은 항상 새 작업 폴더로
+    처음부터 다시 시작하며, 이는 TaskItem의 기존 설계와 같다(pipeline.TaskItem
+    docstring 참조).
+    """
+    ctx = job.context
+    return TaskItem(
+        task_id=pipeline.new_task_id(),
+        label=job.label,
+        keyword=ctx.keyword,
+        workflow_kind=ctx.workflow_kind,
+        review_draft=ctx.review_draft,
+        comment=ctx.comment,
+        connect_affiliate_links=dict(ctx.connect_affiliate_links),
+        image_paths=list(ctx.image_paths),
+        use_crawling=ctx.use_crawling,
+        crawl_count=ctx.crawl_count,
+        generate_images=ctx.generate_images,
+        image_gen_count=ctx.image_gen_count,
+        search_images=ctx.search_images,
+        search_images_download=ctx.search_images_download,
+        search_images_timing=ctx.search_images_timing,
+        agents_md_path=ctx.agents_md_path,
+        ai_model=ctx.ai_model,
+        account_id=ctx.account_id,
+        resume_work_dir=str(ctx.work_dir or ctx.resume_work_dir) if (ctx.work_dir or ctx.resume_work_dir) else None,
+        resume_only=ctx.resume_only,
+        reuse_work_dir=str(ctx.reuse_work_dir) if ctx.reuse_work_dir else None,
+        checkpoint_id=ctx.checkpoint_id,
+    )
+
+
+def _job_info_text(job: QueuedJob) -> str:
+    """QueuedJob의 설정을 사람이 읽을 수 있는 여러 줄 텍스트로 요약한다.
+
+    멀티 작업 탭에서 진행 중 작업을 더블클릭했을 때 조회용으로 보여준다(수정은
+    JobQueueManager.update_pending 참조 — 진행 중인 작업은 대상이 아니라 조회만 한다).
+    """
+    ctx = job.context
+    if ctx.workflow_kind == "style":
+        return "\n".join([
+            f"작업 #{job.job_id}: {job.label} ({job.status})",
+            "작업 방식: 첫 검색 글 스타일 분석",
+            f"키워드: {ctx.keyword}",
+            f"AI 모델: {config.ai_model_label(ctx.ai_model)}",
+            f"발행 계정: {pipeline.account_label(ctx.account_id)}",
+            f"크롤링: 항상 사용 ({ctx.crawl_count}건)",
+            "AI 이미지 생성: 첫 글 이미지 수에 맞춰 자동 결정 (최대 15장)",
+            "AGENTS.md: 첫 글 분석 결과로 작업별 자동 생성",
+            "작성 관점: 방문 전 조사, 원문 복사 금지",
+            "네이버 로그인: 수동",
+            f"코멘트: {ctx.comment or '(없음)'}",
+        ])
+    return "\n".join(
+        [
+            f"작업 #{job.job_id}: {job.label} ({job.status})",
+            f"키워드: {ctx.keyword}",
+            f"AI 모델: {config.ai_model_label(ctx.ai_model)}",
+            f"발행 계정: {pipeline.account_label(ctx.account_id)}",
+            f"크롤링: {'사용 (' + str(ctx.crawl_count) + '건)' if ctx.use_crawling else '사용 안 함'}",
+            f"AI 이미지 생성: {'사용 (' + str(ctx.image_gen_count) + '장)' if ctx.generate_images else '사용 안 함'}",
+            f"AGENTS.md: {ctx.agents_md_path or '기본값'}",
+            f"이미지: {len(ctx.image_paths)}장",
+            "네이버 로그인: 수동",
+            f"코멘트: {ctx.comment or '(없음)'}",
+        ]
+    )
+
+
+class JobQueueManager(QObject):
+    """"전체 실행" 요청을 대기열에 쌓아 두고 한 번에 하나씩만 실행하는 관리자.
+
+    하나의 글 작성(파이프라인 전체 실행)이 진행되는 동안 새 요청이 들어오면 즉시
+    시작하지 않고 대기열 맨 뒤에 넣어 뒀다가, 현재 작업이 끝난 직후 순서대로(FIFO)
+    이어서 실행한다. RunLogTab의 "전체 실행" 버튼과 MultiTaskTab이 이 매니저 하나를
+    공유해서 진행 중/대기 중 상태를 표시한다.
+    """
+
+    changed = Signal()  # 대기열/현재 작업 상태가 바뀔 때(추가/시작/완료)마다 발행
+    job_step = Signal(int, str, str)  # job_id, step name, status
+    job_done = Signal(int, dict)  # job_id, result
+    review_requested = Signal(object, object)
+    review_selected = Signal(object, object)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._pending: list[QueuedJob] = []
+        self._current: QueuedJob | None = None
+        self._worker: PipelineWorker | None = None
+        self._reviews: dict[int, dict] = {}
+        self._next_id = 1
+        self._shutting_down = False
+
+    def restore(self) -> None:
+        """Restore queued jobs and discover earlier failed saves with verified drafts."""
+        saved = pipeline.load_queue_state()
+        known = {task.checkpoint_id for task in saved}
+        imported = [task for task in pipeline.recoverable_tasks() if task.checkpoint_id not in known]
+        saved.extend(imported)
+        for task in saved:
+            context = task.to_pipeline_context()
+            job = QueuedJob(self._next_id, task.label, context)
+            checkpoint = pipeline.load_resume_checkpoint(context)
+            if checkpoint is not None:
+                if pipeline.dismissed_checkpoint(context, checkpoint[0]).exists():
+                    continue
+                self._park_completed_draft(job, checkpoint)
+            elif context.resume_only:
+                self._park_missing_draft(job)
+            else:
+                self._pending.append(job)
+            self._next_id += 1
+        if imported:
+            self._persist()
+        if saved:
+            self.changed.emit()
+
+    def _park_completed_draft(self, job: QueuedJob, checkpoint, result: dict | None = None) -> None:
+        work_dir, draft = checkpoint
+        job.context.resume_work_dir = work_dir
+        job.context.resume_only = True
+        state = pipeline.publish_recovery_state(work_dir, draft, result)
+        job.status = _PUBLISH_QUEUE_LABELS.get(state, '확인 필요')
+        self._reviews[job.job_id] = {'job': job, 'worker': None, 'path': draft, 'recovery': state}
+
+    def _park_missing_draft(self, job: QueuedJob) -> None:
+        job.status = _PUBLISH_QUEUE_LABELS['missing']
+        self._reviews[job.job_id] = {'job': job, 'worker': None, 'path': None, 'recovery': 'missing'}
+
+    def review_recovery(self, job_id: int) -> str:
+        return self._reviews.get(job_id, {}).get('recovery', '')
+
+    def resolve_save_status(self, job_id: int, *, saved: bool) -> bool:
+        entry = self._reviews.get(job_id)
+        if entry is None or entry['worker'] is not None or entry.get('recovery') != 'unknown':
+            return False
+        job = entry['job']
+        work_dir = job.context.resume_work_dir
+        pipeline.resolve_publish_uncertainty(work_dir, entry['path'], saved=saved)
+        self._park_completed_draft(job, (work_dir, entry['path']))
+        if not saved:
+            self._reviews[job_id]['recovery'] = 'retry'
+            job.status = _PUBLISH_QUEUE_LABELS['retry']
+        self._persist()
+        self.changed.emit()
+        return True
+
+    def _persist(self) -> None:
+        """현재 대기 중/진행 중 작업을 queue_state.json에 저장한다.
+
+        완료된 작업은 이 목록에 안 들어가므로 자연히 빠진다. 진행 중인 작업을 목록
+        맨 앞에 둬서, 다음 실행 시 그 작업부터 재시도되게 한다.
+        """
+        jobs = [entry['job'] for entry in self._reviews.values()] + ([self._current] if self._current is not None else []) + self._pending
+        pipeline.save_queue_state([_job_to_task_item(job) for job in jobs])
+
+    def enqueue(self, context: PipelineContext, label: str, auto_start: bool = True) -> QueuedJob:
+        """대기열에 작업을 추가한다.
+
+        auto_start=False는 앱 시작 시 restore()가 이전 대기열을 복원할 때만 쓴다 —
+        복원된 작업은 사용자가 "멀티 작업" 탭에서 시작 버튼을 눌러야 실행되고,
+        UI 조작(대기열에 추가 등)으로 새로 들어온 작업은 그대로 즉시 실행된다.
+        """
+        job = QueuedJob(job_id=self._next_id, label=label, context=context)
+        self._next_id += 1
+        self._pending.append(job)
+        self._persist()
+        self.changed.emit()
+        if auto_start:
+            self._start_next_if_idle()
+        return job
+
+    def start_pending(self) -> None:
+        """대기 중인 작업을 (현재 진행 중인 작업이 없으면) 시작한다.
+
+        restore()로 복원돼 auto_start=False로 대기열에만 쌓인 작업을 사용자가
+        "멀티 작업" 탭의 시작 버튼으로 명시적으로 시작시킬 때 쓴다.
+        """
+        self._start_next_if_idle(retry_drafts=True)
+
+    def current_job(self) -> QueuedJob | None:
+        return next(iter(self.running_jobs()), None)
+
+    def running_jobs(self) -> list[QueuedJob]:
+        generating = [self._current] if self._current is not None else []
+        publishing = [entry['job'] for entry in self._reviews.values() if entry.get('publishing')]
+        return generating + publishing
+
+    def pending_jobs(self) -> list[QueuedJob]:
+        return [entry['job'] for entry in self._reviews.values() if not entry.get('publishing')] + list(self._pending)
+
+    def is_review_job(self, job_id: int) -> bool:
+        return job_id in self._reviews
+
+    def has_pending_work(self) -> bool:
+        return bool(self._pending) or self._next_retry_job() is not None
+
+    def active_workers(self) -> list[PipelineWorker]:
+        workers = [self._worker] if self._worker is not None and self._worker.isRunning() else []
+        workers.extend(entry['worker'] for entry in self._reviews.values()
+                       if entry['worker'] is not None and entry['worker'].isRunning())
+        return workers
+
+    def cancel_review_workers(self) -> None:
+        for entry in self._reviews.values():
+            if entry['worker'] is not None:
+                entry['worker'].cancel()
+
+    def remove_pending(self, job_id: int) -> bool:
+        """대기 중(아직 시작되지 않은) 작업 하나를 대기열에서 지운다.
+
+        이미 진행 중인 작업(current_job)은 대상이 아니다 — 실행 중인 파이프라인을
+        중간에 강제 종료하는 기능은 이번 범위가 아니고, 대기 중인 작업만 취소한다.
+        해당 job_id가 대기열에 없으면(이미 시작됐거나 잘못된 id) False를 반환한다.
+        """
+        for i, job in enumerate(self._pending):
+            if job.job_id == job_id:
+                del self._pending[i]
+                self._persist()
+                self.changed.emit()
+                return True
+        return False
+
+    def move_pending(self, job_id: int, offset: int) -> bool:
+        """대기 중인 작업의 실행 순서를 offset만큼 옮긴다(-1=위로, +1=아래로, 사용자 요청).
+
+        TaskManager.move와 같은 패턴 — 범위를 벗어나면(맨 위/맨 아래) 조용히 무시하고
+        False를 반환한다. 이미 진행 중인 작업은 대상이 아니다(대기열 순서 자체가 없음).
+        """
+        idx = next((i for i, j in enumerate(self._pending) if j.job_id == job_id), None)
+        if idx is None:
+            return False
+        new_idx = idx + offset
+        if not (0 <= new_idx < len(self._pending)):
+            return False
+        self._pending[idx], self._pending[new_idx] = self._pending[new_idx], self._pending[idx]
+        self._persist()
+        self.changed.emit()
+        return True
+
+    def remove_pending_bulk(self, job_ids: set[int]) -> int:
+        """여러 대기 작업을 한 번에 지운다(사용자 요청: 멀티 선택 삭제).
+
+        remove_pending을 반복 호출하는 것과 결과는 같지만, 매번 changed를 emit하지
+        않고 한 번만 emit해 UI 갱신을 한 번으로 묶는다. 삭제된 개수를 반환한다.
+        """
+        remaining = [job for job in self._pending if job.job_id not in job_ids]
+        removed = len(self._pending) - len(remaining)
+        for job_id in job_ids:
+            entry = self._reviews.get(job_id)
+            if entry is None or entry['job'].status in ('임시저장 중', '취소 중…'):
+                continue
+            job = entry['job']
+            if entry.get('recovery') and job.context.resume_work_dir is not None:
+                work_dir = job.context.resume_work_dir
+                try:
+                    pipeline.dismissed_checkpoint(job.context, work_dir).touch()
+                except OSError:
+                    logger.exception('작업을 대기열에서 숨기는 상태를 저장하지 못했습니다.')
+                    continue
+            if entry['worker'] is None:
+                del self._reviews[job_id]
+            else:
+                entry['job'].status = '취소 중…'
+                entry['worker'].cancel()
+            removed += 1
+        if removed:
+            self._pending = remaining
+            self._persist()
+            self.changed.emit()
+        return removed
+
+    def move_pending_bulk(self, job_ids: set[int], offset: int) -> bool:
+        """대기 중인 여러 작업을 한 번에 옮긴다(사용자 요청: 멀티 선택 이동).
+
+        move_pending과 같은 규칙(-1=위로, +1=아래로)을 여러 개에 동시에 적용한다.
+        선택된 항목끼리는 서로 자리를 바꾸지 않고 한 덩어리로 움직여야 하므로, 이웃이
+        선택되지 않은 경우에만 스왑한다(다중 선택 리스트 이동의 표준 패턴) — 아래로
+        옮길 때는 맨 아래 항목부터, 위로 옮길 때는 맨 위 항목부터 순서대로 처리해야
+        블록 안에서 항목끼리 서로 밀어내지 않는다.
+        """
+        indices = {i for i, j in enumerate(self._pending) if j.job_id in job_ids}
+        if not indices:
+            return False
+        moved = False
+        for i in sorted(indices, reverse=offset > 0):
+            j = i + offset
+            if not (0 <= j < len(self._pending)) or j in indices:
+                continue
+            self._pending[i], self._pending[j] = self._pending[j], self._pending[i]
+            indices.discard(i)
+            indices.add(j)
+            moved = True
+        if moved:
+            self._persist()
+            self.changed.emit()
+        return moved
+
+    def is_busy(self) -> bool:
+        """현재 실행 중인 파이프라인 워커가 있는지(창 닫기 확인용)."""
+        return bool(self.active_workers())
+
+    def current_worker(self) -> "PipelineWorker | None":
+        """현재 실행 중인 워커(창 닫기 시 wait()용). is_busy()가 False면 의미 없다."""
+        return self._worker
+
+    def cancel_current(self, job_id: int | None = None) -> bool:
+        """Request cancellation for the selected running job."""
+        job = self.current_job() if job_id is None else next(
+            (job for job in self.running_jobs() if job.job_id == job_id), None)
+        if job is None:
+            return False
+        worker = self._worker if job is self._current else self._reviews[job.job_id]['worker']
+        if worker is None:
+            return False
+        if job.status == "취소 중…":
+            return True
+        job.status = "취소 중…"
+        worker.cancel()
+        self.changed.emit()
+        return True
+
+    def update_pending(self, job_id: int, context: PipelineContext, label: str) -> bool:
+        """대기 중인 작업 하나의 설정(키워드/이미지/AI 모델 등)과 이름을 갈아 끼운다.
+
+        remove_pending과 같은 이유로 대기 중인 작업만 대상이다 — 이미 실행 중인
+        파이프라인의 context를 바꿔도 워커 스레드는 시작 시점에 캡처해 둔 값을 그대로
+        쓰므로 아무 효과가 없어 혼동만 준다. 해당 job_id가 대기열에 없으면 False.
+        """
+        for job in self._pending:
+            if job.job_id == job_id:
+                job.context = context
+                job.label = label
+                self._persist()
+                self.changed.emit()
+                return True
+        return False
+
+    def _next_retry_job(self) -> QueuedJob | None:
+        if self._shutting_down or self.running_jobs():
+            return None
+        for entry in self._reviews.values():
+            if entry.get('recovery') != 'retry' or entry['worker'] is not None:
+                continue
+            job = entry['job']
+            checkpoint = pipeline.load_resume_checkpoint(job.context)
+            if checkpoint is not None and pipeline.can_auto_retry_draft(job.context, *checkpoint):
+                return job
+        return None
+
+    def _start_next_if_idle(self, *, retry_drafts=False) -> None:
+        if self._shutting_down or self._current is not None:
+            return
+
+        job = self._next_retry_job() if retry_drafts else None
+        auto_retry = job is not None
+        if auto_retry:
+            del self._reviews[job.job_id]
+        else:
+            if not self._pending:
+                return
+            job = self._pending.pop(0)
+        job.status = "임시저장 중 · 자동 재시도" if auto_retry else "진행중"
+        self._current = job
+        self._persist()
+        self.changed.emit()
+
+        worker = PipelineWorker(job.context, auto_retry=True) if auto_retry else PipelineWorker(job.context)
+        self._connect_worker(job, worker)
+        self._worker = worker
+        worker.start()
+
+    def _connect_worker(self, job: QueuedJob, worker: PipelineWorker) -> None:
+        worker.review_requested.connect(lambda path, jid=job.job_id, w=worker: self._park_for_review(jid, w, path))
+        worker.step_signal.connect(lambda name, status, jid=job.job_id: self._on_worker_step(jid, name, status))
+        worker.finished_signal.connect(lambda result, jid=job.job_id: self._on_worker_finished(jid, result))
+
+    def _park_for_review(self, job_id: int, worker: PipelineWorker, path: Path) -> None:
+        if self._shutting_down:
+            worker.cancel()
+            return
+        if self._current is not None and self._current.job_id == job_id:
+            job = self._current
+            self._current = None
+            self._worker = None
+            job.status = '확인 필요'
+            self._reviews[job_id] = {'job': job, 'worker': worker, 'path': Path(path)}
+        elif job_id in self._reviews:
+            self._reviews[job_id].update(worker=worker, path=Path(path))
+        else:
+            worker.cancel()
+            return
+        self._persist()
+        self.changed.emit()
+        entry = self._reviews[job_id]
+        if entry.pop('open_requested', False):
+            self.review_selected.emit(worker, Path(path))
+        else:
+            self.review_requested.emit(worker, Path(path))
+        self._start_next_if_idle()
+
+    def open_review(self, job_id: int, *, editor_checked=False) -> bool:
+        entry = self._reviews.get(job_id)
+        if entry is None or entry['job'].status in ('임시저장 중', '취소 중…'):
+            return False
+        state = entry.get('recovery', '')
+        if state in ('unknown', 'saved', 'missing') or (state == 'editor' and not editor_checked):
+            return False
+        if entry['worker'] is None:
+            worker = PipelineWorker(entry['job'].context)
+            entry['worker'] = worker
+            entry['open_requested'] = True
+            self._connect_worker(entry['job'], worker)
+            worker.start()
+        else:
+            self.review_selected.emit(entry['worker'], entry['path'])
+        return True
+
+    def mark_review_approved(self, worker: PipelineWorker) -> None:
+        for entry in self._reviews.values():
+            if entry['worker'] is worker:
+                entry['job'].status = '임시저장 중'
+                entry['publishing'] = True
+                self._persist()
+                self.changed.emit()
+                return
+
+    def _on_worker_step(self, job_id: int, name: str, status: str) -> None:
+        if (self._current is not None and self._current.job_id == job_id) or job_id in self._reviews:
+            self._persist()
+        self.job_step.emit(job_id, name, status)
+
+    def _on_worker_finished(self, job_id: int, result: dict) -> None:
+        is_current = self._current is not None and self._current.job_id == job_id
+        review = self._reviews.get(job_id)
+        if not is_current and review is None:
+            logger.warning('완료된 작업 #%s을 찾지 못했습니다.', job_id)
+            return
+        finished_job = self._current if is_current else review['job']
+        finished_worker = self._worker if is_current else review['worker']
+        steps = result.get("steps", {}).values()
+        canceled = any(step.get("status") == "canceled" for step in steps)
+        failed = any(step.get("status") == "failed" for step in steps)
+        completed = (not canceled and
+                     (not failed or result.get('steps', {}).get('publish', {}).get('status') == 'success'))
+        auto_retry = getattr(finished_worker, 'auto_retry', False) is True
+        # A restored review job has no running worker until the user double-clicks
+        # it. That worker may fail while checking the login session, before it
+        # reaches request_review(). Keep the saved draft in the review list in
+        # that case: removing it would make a transient login failure look like
+        # the user deleted the draft. Explicit deletion changes the status to
+        # "취소 중…", and sending the draft changes it to "임시저장 중", so those
+        # paths still finish normally below.
+        if (review is not None and finished_job.status == "확인 필요" and (failed or canceled)
+                and pipeline.load_resume_checkpoint(finished_job.context) is not None):
+            if finished_worker is not None:
+                finished_worker.wait()
+            review['worker'] = None
+            self._persist()
+            self.changed.emit()
+            logger.info("초안 검토 작업 #%s을 로그인 확인 실패 후 대기열에 유지했습니다.", job_id)
+            return
+        finished_job.status = "취소됨" if canceled else ("실패" if failed else ("수동 발행 대기" if any(step.get("status") == "manual_ready" for step in steps) else "완료"))
+        self.job_done.emit(job_id, result)
+        if is_current:
+            self._current = None
+        # finished_signal은 PipelineWorker.run()이 emit()한 직후(스레드가 실제로 완전히
+        # 끝나기 직전)에 도착하는 큐잉 신호라, 여기서 곧바로 self._worker = None으로
+        # 마지막 파이썬 참조를 끊으면 아직 실행 중인 QThread가 GC될 수 있다 —
+        # "QThread: Destroyed while thread is still running" 경고와 함께 앱 전체가
+        # 죽는 문제가 실측 확인됐다(_step_worker_busy 주석의 GC 문제와 동일 계열).
+        # wait()로 네이티브 스레드가 실제로 끝난 뒤에만 참조를 놓는다(이미 끝나기
+        # 직전이라 즉시 반환된다).
+        if finished_worker is not None:
+            finished_worker.wait()
+        if is_current:
+            self._worker = None
+        checkpoint = pipeline.load_resume_checkpoint(finished_job.context)
+        if checkpoint is not None:
+            work_dir, draft = checkpoint
+            recovery_result = None if auto_retry and canceled else result
+            recovery = pipeline.publish_recovery_state(work_dir, draft, recovery_result)
+            if (recovery and (not canceled or auto_retry or recovery in ('unknown', 'saved')) and
+                    not pipeline.dismissed_checkpoint(finished_job.context, work_dir).exists()):
+                self._park_completed_draft(finished_job, checkpoint, recovery_result)
+                self._persist()
+                self.changed.emit()
+                self._start_next_if_idle(retry_drafts=completed)
+                return
+        elif failed and finished_job.context.resume_only and finished_job.status != '취소 중…':
+            self._park_missing_draft(finished_job)
+            self._persist()
+            self.changed.emit()
+            self._start_next_if_idle()
+            return
+        if self._shutting_down:
+            # Closing the application pauses the current job; explicit cancel
+            # through the queue remains a separate operation.
+            if is_current:
+                finished_job.status = "대기"
+                self._pending.insert(0, finished_job)
+            else:
+                finished_job.status = "확인 필요"
+                review['worker'] = None
+                review.pop('publishing', None)
+            self._persist()
+            self.changed.emit()
+            return
+        if review is not None:
+            del self._reviews[job_id]
+        self._persist()
+        self.changed.emit()
+        self._start_next_if_idle(retry_drafts=completed)
+
+
+class StepWorker(QThread):
+    """단일 단계 함수(인자 없는 callable)를 별도 스레드에서 실행하는 범용 워커.
+
+    pipeline.run_crawling/run_generation/run_publish처럼 서로 다른 반환 타입을 갖는
+    함수를 각 단계 버튼에서 재사용하기 위해, 실행할 함수를 클로저로 감싸 넘긴다.
+    """
+
+    finished_signal = Signal(object)
+    review_requested = Signal(object)
+    request_review = PipelineWorker.request_review
+    resolve_review = PipelineWorker.resolve_review
+
+    def __init__(self, func: Callable[[], object], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._func = func
+        self.cancel_event = threading.Event()
+        self.review_event = threading.Event()
+        self.review_approved = False
+
+    def run(self) -> None:
+        self.finished_signal.emit(self._func())
+
+
+class RunLogTab(QWidget):
+    """실행 버튼, 단계별 상태, 진행 로그를 표시하는 실행·로그 탭.
+
+    "전체 실행" 외에 크롤링/AI 글작성/발행을 각각 단독으로 실행하는 버튼을 둔다 —
+    각 단계 산출물(크롤링 txt, 생성된 md, 발행 결과)이 실제로 올바른지 단계별로 눈으로
+    확인하고 싶을 때 쓴다. 세 단계는 같은 work_dir(작업 폴더)를 공유해야 하므로, 첫 버튼
+    클릭 시 _ensure_context()가 work_dir을 한 번 정하고 이후 클릭들은 이를 재사용한다.
+    """
+
+    progress_changed = Signal(str, str)
+    review_requested = Signal(object, object)
+    STEP_NAMES = ("login", "crawl", "generate", "image_gen", "image_search", "publish")
+    STEP_LABELS = {
+        "login": "네이버 로그인 확인",
+        "crawl": "크롤링",
+        "generate": "AI 생성",
+        "image_gen": "이미지 생성",
+        "image_search": "이미지 검색",
+        "publish": "임시저장",
+    }
+
+    def __init__(
+        self, input_tab: InputTab, job_queue: JobQueueManager | None = None, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.input_tab = input_tab
+        self.job_queue = job_queue if job_queue is not None else JobQueueManager(self)
+        self.job_queue.job_step.connect(self._on_queue_step)
+        self.job_queue.job_done.connect(self._on_queue_done)
+        self.step_worker: StepWorker | None = None
+
+        self.context: PipelineContext | None = None
+        self.work_dir: Path | None = None
+        self.blog_txts: list[Path] = []
+        self.md_path: Path | None = None
+
+        self._step_start_times: dict[str, float] = {}
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
+        self.run_button = QPushButton("전체 실행")
+        self.run_button.clicked.connect(self._on_run_clicked)
+
+        self.crawl_button = QPushButton("1. 크롤링만 실행")
+        self.crawl_button.clicked.connect(self._on_crawl_only_clicked)
+        self.generate_button = QPushButton("2. AI 글작성만 실행")
+        self.generate_button.clicked.connect(self._on_generate_only_clicked)
+        self.image_gen_button = QPushButton("3. 이미지 생성만 실행")
+        self.image_gen_button.clicked.connect(self._on_image_gen_only_clicked)
+        self.publish_button = QPushButton("4. 블로그 발행만 실행")
+        self.publish_button.clicked.connect(self._on_publish_only_clicked)
+        self.reset_button = QPushButton("작업 폴더 초기화")
+        self.reset_button.clicked.connect(self._on_reset_clicked)
+        self.open_work_dir_button = QPushButton("작업 폴더 열기")
+        self.open_work_dir_button.clicked.connect(self._on_open_work_dir_clicked)
+
+        step_button_row = QHBoxLayout()
+        step_button_row.addWidget(self.crawl_button)
+        step_button_row.addWidget(self.generate_button)
+        step_button_row.addWidget(self.image_gen_button)
+        step_button_row.addWidget(self.publish_button)
+        step_button_row.addWidget(self.reset_button)
+        step_button_row.addWidget(self.open_work_dir_button)
+
+        self.work_dir_label = QLabel("작업 폴더: (아직 없음)")
+
+        self.work_dir_choice_combo = QComboBox()
+        self.work_dir_choice_combo.setToolTip(
+            "같은 키워드로 반복 테스트할 때 폴더가 계속 새로 생기는 것을 막으려면 "
+            "여기서 기존 폴더를 선택하세요. (새 폴더 생성)이면 지금까지와 동일하게 동작합니다."
+        )
+        self.refresh_work_dir_choices_button = QPushButton("새로고침")
+        self.refresh_work_dir_choices_button.clicked.connect(self._refresh_work_dir_choices)
+
+        work_dir_choice_row = QHBoxLayout()
+        work_dir_choice_row.addWidget(QLabel("작업 폴더 선택:"))
+        work_dir_choice_row.addWidget(self.work_dir_choice_combo, 1)
+        work_dir_choice_row.addWidget(self.refresh_work_dir_choices_button)
+
+        self.status_labels: dict[str, QLabel] = {}
+        status_row = QHBoxLayout()
+        for name in self.STEP_NAMES:
+            label = QLabel(f"{self.STEP_LABELS[name]}: 대기")
+            self.status_labels[name] = label
+            status_row.addWidget(label)
+
+        self.prompt_view = QTextEdit()
+        self.prompt_view.setReadOnly(True)
+        self.prompt_view.setPlaceholderText("'AI 글작성만 실행'을 누르면 codex exec에 전달되는 프롬프트가 여기 표시됩니다")
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+
+        self.clear_log_button = QPushButton("로그 초기화")
+        self.clear_log_button.clicked.connect(self.log_view.clear)
+
+        log_header_row = QHBoxLayout()
+        log_header_row.addWidget(QLabel("진행 로그"))
+        log_header_row.addStretch()
+        log_header_row.addWidget(self.clear_log_button)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.run_button)
+        layout.addLayout(step_button_row)
+        layout.addWidget(self.work_dir_label)
+        layout.addLayout(work_dir_choice_row)
+        layout.addLayout(status_row)
+        layout.addWidget(QLabel("codex exec 전달 프롬프트"))
+        layout.addWidget(self.prompt_view)
+        layout.addLayout(log_header_row)
+        layout.addWidget(self.log_view)
+
+        self._refresh_work_dir_choices()
+
+    def _set_step_status(self, name: str, status: str) -> None:
+        """단계 상태 라벨을 갱신한다. status가 "running"이면 1초마다 경과 시간을 함께
+        표시해("running (12초 경과)") 실제로 진행 중인지, 멈춰 있는 건지 구분할 수 있게
+        한다 — 이전에는 "running" 문구가 고정돼 있어 codex exec처럼 수십 초~수 분 걸리는
+        작업이 오래 걸리는 중인지 멈춘 건지 알 방법이 없었다."""
+        self.progress_changed.emit(name, status)
+        label = self.STEP_LABELS.get(name, name)
+        if status == "running":
+            self._step_start_times[name] = time.monotonic()
+            if not self._elapsed_timer.isActive():
+                self._elapsed_timer.start()
+            self.status_labels[name].setText(f"{label}: running (0초 경과)")
+        else:
+            self._step_start_times.pop(name, None)
+            self.status_labels[name].setText(f"{label}: {status}")
+            if not self._step_start_times and self._elapsed_timer.isActive():
+                self._elapsed_timer.stop()
+
+    def _tick_elapsed(self) -> None:
+        now = time.monotonic()
+        for name, start in self._step_start_times.items():
+            label = self.STEP_LABELS.get(name, name)
+            elapsed = int(now - start)
+            self.status_labels[name].setText(f"{label}: running ({elapsed}초 경과)")
+
+    def _on_run_clicked(self) -> None:
+        """전체 실행을 대기열에 추가한다. 다른 작업이 진행 중이어도 버튼을 막지 않고
+
+        곧바로 대기열 뒤에 쌓아 두며(멀티 작업 탭에서 확인 가능), 현재 작업이 끝나는
+        즉시 순서대로 이어서 실행된다.
+        """
+        context = self.input_tab.to_pipeline_context()
+        label = context.keyword.strip() or "(제목 없음)"
+        job = self.job_queue.enqueue(context, label)
+        self.log_view.append(f"[전체 실행] 대기열에 추가됨: {label} (작업 #{job.job_id})")
+
+    def _on_queue_step(self, job_id: int, name: str, status: str) -> None:
+        label = self.STEP_LABELS.get(name, name)
+        current = self.job_queue.current_job()
+        if current is not None and current.job_id == job_id:
+            self._set_step_status(name, status)
+        self.log_view.append(f"[작업 #{job_id}] {label}: {status}")
+
+    def _on_queue_done(self, job_id: int, result: dict) -> None:
+        """전체 실행(대기열) 작업 하나가 끝났을 때 로그를 남기고, 성공 시 단계별 단독
+        실행 버튼들이 공유하는 작업 폴더 상태(self.context/work_dir 등)를 자동으로
+        초기화한다 — "작업 폴더 초기화" 버튼을 수동으로 누르는 것과 동일한 동작이며,
+        다음 전체 실행이 이전 작업 폴더를 잘못 재사용하지 않도록 한다. 실패한 작업은
+        원인 확인을 위해 작업 폴더 상태를 그대로 남겨 둔다.
+        """
+        failed = any(step.get("status") == "failed" for step in result.get("steps", {}).values())
+        self.log_view.append(f"[작업 #{job_id}] {'실패' if failed else '완료'}")
+        current = self.job_queue.current_job()
+        if not failed and current is not None and current.job_id == job_id:
+            self._on_reset_clicked()
+
+    def _ensure_context(self) -> PipelineContext:
+        """단계별 단독 실행 버튼들이 공유할 PipelineContext/work_dir을 처음 한 번만 정한다.
+
+        입력 탭 값으로 컨텍스트를 만들고(전체 실행과 동일한 규칙으로 work_dir 결정/재사용),
+        images_dir와 output_dir을 만들고 이미지도 미리 복사해 둔다 — run_pipeline이 하던
+        일 중 "크롤링 전 준비" 부분만 떼어낸 것이다.
+
+        work_dir_choice_combo에서 기존 폴더를 선택해뒀으면 그 폴더를 재사용한다(입력
+        탭의 재사용 선택과 무관하게, 실행·로그 탭에서 바로 고를 수 있게 한 것 — 같은
+        키워드로 반복 테스트할 때마다 폴더가 _2, _3... 으로 계속 늘어나는 문제 때문에
+        추가됨). "(새 폴더 생성)"이 선택돼 있으면 기존과 동일하게 새 폴더를 만든다.
+        """
+        if self.context is not None:
+            return self.context
+
+        context = self.input_tab.to_pipeline_context()
+        chosen_dir_str = self.work_dir_choice_combo.currentData()
+        if chosen_dir_str is not None:
+            context.reuse_work_dir = Path(chosen_dir_str)
+
+        reuse = context.reuse_work_dir is not None
+        work_dir = context.reuse_work_dir if reuse else pipeline._resolve_work_dir(context.keyword)
+        context.work_dir = work_dir
+
+        config.output_dir(work_dir).mkdir(parents=True, exist_ok=True)
+
+        if reuse:
+            images_dir_path = config.images_dir(work_dir)
+            images_dir_path.mkdir(parents=True, exist_ok=True)
+            context.image_paths = [str(p) for p in sorted(images_dir_path.iterdir()) if p.is_file()]
+
+        self.context = context
+        self.work_dir = work_dir
+        self.work_dir_label.setText(f"작업 폴더: {work_dir}")
+        self.log_view.append(f"작업 폴더 준비됨: {work_dir}" + (" (기존 폴더 재사용)" if reuse else " (새 폴더)"))
+
+        if not reuse:
+            self._sync_images_to_work_dir()
+
+        self._refresh_work_dir_choices()
+        return context
+
+    def _refresh_work_dir_choices(self) -> None:
+        """PostResult 폴더의 하위 폴더 전체로 work_dir_choice_combo를 다시 채운다.
+
+        키워드로 거르지 않고 config.list_post_result_dirs()가 찾은 폴더를 전부(최신순)
+        보여준다 — 첫 항목은 항상 "(새 폴더 생성)"(userData=None)이다. userData는
+        Path가 아니라 str(경로)로 저장한다 — PySide6의 QComboBox.findData()가 값은
+        같지만 객체 identity가 다른 Path끼리는 못 찾는 것을 실측으로 확인했다(문자열은
+        정상 비교됨). 다시 채우는 동안 기존 선택을 최대한 유지한다(같은 폴더가 목록에
+        남아 있으면 그대로 선택된 채로 둔다).
+        """
+        previous_data = self.work_dir_choice_combo.currentData()
+
+        self.work_dir_choice_combo.blockSignals(True)
+        self.work_dir_choice_combo.clear()
+        self.work_dir_choice_combo.addItem("(새 폴더 생성)", None)
+        for existing_dir in config.list_post_result_dirs():
+            self.work_dir_choice_combo.addItem(existing_dir.name, str(existing_dir))
+
+        if previous_data is not None:
+            index = self.work_dir_choice_combo.findData(previous_data)
+            if index >= 0:
+                self.work_dir_choice_combo.setCurrentIndex(index)
+        self.work_dir_choice_combo.blockSignals(False)
+
+    def _sync_images_to_work_dir(self) -> None:
+        """입력 탭에 있는 이미지를 현재 work_dir/images/로 복사·동기화한다.
+
+        _ensure_context()가 처음 호출된 시점 이후에 입력 탭에 이미지를 추가하고
+        바로 "AI 글작성만 실행"을 누르는 경우가 있어(_ensure_context는 최초 1회만
+        images_dir을 만들고 복사한다), 아직 복사 안 된 이미지가 있으면 images_dir이
+        없어도 새로 만들고 그 시점의 최신 이미지 목록으로 채운다. 이미 복사된 파일은
+        shutil.copy2가 덮어쓸 뿐이라 중복 복사돼도 안전하다.
+        """
+        if self.context is None or self.work_dir is None:
+            return
+        if self.context.reuse_work_dir is not None:
+            return
+
+        images_dir_path = config.images_dir(self.work_dir)
+        images_dir_path.mkdir(parents=True, exist_ok=True)
+
+        current_image_paths = list(self.input_tab.image_drop_list.image_paths)
+        for p in current_image_paths:
+            shutil.copy2(p, images_dir_path / Path(p).name)
+
+        self.context.image_paths = current_image_paths
+        if current_image_paths:
+            self.log_view.append(f"이미지 {len(current_image_paths)}장을 {images_dir_path}로 복사함")
+
+    def _on_open_work_dir_clicked(self) -> None:
+        """탐색기(운영체제 기본 파일 관리자)로 현재 작업 폴더를 연다.
+
+        아직 work_dir이 정해지지 않았으면(어떤 단계도 실행한 적 없으면) 로그에만 안내하고
+        아무 것도 열지 않는다.
+        """
+        if self.work_dir is None:
+            self.log_view.append("작업 폴더 열기: 아직 작업 폴더가 없습니다 (먼저 단계를 하나 실행하세요)")
+            return
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.work_dir)))
+
+    def _on_reset_clicked(self) -> None:
+        """다른 키워드로 다시 단계별 테스트를 하고 싶을 때 공유 상태를 비운다."""
+        self.context = None
+        self.work_dir = None
+        self.blog_txts = []
+        self.md_path = None
+        self.work_dir_label.setText("작업 폴더: (아직 없음)")
+        self.prompt_view.clear()
+        for name in self.STEP_NAMES:
+            self._set_step_status(name, "대기")
+        self.log_view.append("작업 폴더 상태 초기화됨")
+        self._refresh_work_dir_choices()
+
+    def _step_worker_busy(self) -> bool:
+        """다른 단계별 실행 버튼이 이미 백그라운드에서 돌고 있는지 확인한다.
+
+        self.step_worker는 크롤링/AI 글작성/이미지 생성/발행 4개 "단독 실행" 버튼이
+        공유하는 슬롯 하나뿐이다. 각 버튼은 자기 자신이 다시 눌리는 것만 막고
+        (setEnabled(False)) 있어서, 한 단계가 실행 중일 때 다른 단계 버튼을 누르면
+        self.step_worker가 아직 끝나지 않은 이전 QThread를 참조 없이 덮어써버렸다 —
+        파이썬이 그 QThread 래퍼를 GC하면서 "QThread: Destroyed while thread ''
+        is still running" 경고와 함께 앱이 먹통되는 문제가 실측 확인됐다. 이 체크를
+        각 버튼 핸들러 맨 앞에 둬서, 이전 단계가 끝나기 전에는 다른 단계도 시작하지
+        못하게 막는다.
+        """
+        if self.step_worker is not None and self.step_worker.isRunning():
+            self.log_view.append("경고: 다른 단계가 아직 실행 중입니다 — 끝난 뒤 다시 시도하세요")
+            return True
+        return False
+
+    def _on_crawl_only_clicked(self) -> None:
+        if self._step_worker_busy():
+            return
+        context = self._ensure_context()
+        self._sync_images_to_work_dir()
+        self.crawl_button.setEnabled(False)
+        self._set_step_status("crawl", "running")
+        self.log_view.append("[크롤링만 실행] 시작")
+
+        work_dir = self.work_dir
+        assert work_dir is not None
+        self.step_worker = StepWorker(lambda: pipeline.run_crawling(context, work_dir))
+        self.step_worker.finished_signal.connect(self._on_crawl_only_finished)
+        self.step_worker.start()
+
+    def _on_crawl_only_finished(self, status: object) -> None:
+        assert isinstance(status, str)
+        assert self.work_dir is not None
+        self._set_step_status("crawl", status)
+        blog_dir_path = config.blog_dir(self.work_dir)
+        self.blog_txts = list(blog_dir_path.glob("*.txt")) if blog_dir_path.exists() else []
+        self.log_view.append(f"[크롤링만 실행] 완료: {status} (blog/*.txt {len(self.blog_txts)}건 — {blog_dir_path})")
+        self.crawl_button.setEnabled(True)
+
+    def _on_generate_only_clicked(self) -> None:
+        if self._step_worker_busy():
+            return
+        context = self._ensure_context()
+        assert self.work_dir is not None
+
+        self._sync_images_to_work_dir()
+
+        if not self.blog_txts:
+            blog_dir_path = config.blog_dir(self.work_dir)
+            self.blog_txts = list(blog_dir_path.glob("*.txt")) if blog_dir_path.exists() else []
+
+        backend, _model = config.parse_ai_model(context.ai_model)
+        prompt = pipeline._build_generation_prompt(context, self.blog_txts, backend)
+        self.prompt_view.setPlainText(prompt)
+        self.log_view.append(f"[AI 글작성만 실행] 프롬프트 {len(prompt)}자 구성 완료 — 위 프롬프트 창 확인")
+
+        self.generate_button.setEnabled(False)
+        self._set_step_status("generate", "running")
+
+        work_dir = self.work_dir
+        blog_txts = self.blog_txts
+        self.step_worker = StepWorker(lambda: pipeline.run_generation(context, work_dir, blog_txts))
+        self.step_worker.finished_signal.connect(self._on_generate_only_finished)
+        self.step_worker.start()
+
+    def _on_generate_only_finished(self, result: object) -> None:
+        assert isinstance(result, tuple)
+        status, md_path, generated_paths = result
+        self.md_path = md_path
+        self._set_step_status("generate", status)
+        self.log_view.append(
+            f"[AI 글작성만 실행] 완료: {status}, md_path={md_path}"
+            + (f" (이미지 {len(generated_paths)}장 함께 생성됨)" if generated_paths else "")
+        )
+        self.generate_button.setEnabled(True)
+
+    def _on_image_gen_only_clicked(self) -> None:
+        """이미지만 별도로 재생성한다. Task 017부터 정상 흐름("2. AI 글작성만 실행"/전체
+        실행)은 글 작성과 이미지 생성을 같은 codex exec 호출 한 번으로 처리하므로, 이 버튼은
+        이미지가 마음에 안 들거나 실패했을 때 다시 시도하는 용도로만 남는다. self.md_path
+        (먼저 "AI 글작성만 실행"으로 만들어진 글)를 참고 자료로 쓰고, 생성한 이미지를 codex가
+        그 글에 직접 삽입한다. 아직 글작성을 실행하지 않았으면 md_path가 None이라 참고
+        텍스트/삽입 지시 없이 이미지만 생성된다(경고 로그로 안내). 입력 탭의 "AI 실사 이미지
+        생성" 체크와 무관하게 여기서는 항상 시도한다고 오해하기 쉽지만, run_crawling과 동일한
+        이유로 pipeline.run_image_generation도 context.generate_images가 꺼져 있으면
+        "skipped"를 반환한다 — 실제로 테스트하려면 입력 탭에서 체크박스를 먼저 켜야 한다."""
+        if self._step_worker_busy():
+            return
+        context = self._ensure_context()
+        assert self.work_dir is not None
+
+        self._sync_images_to_work_dir()
+
+        if self.md_path is None:
+            self.log_view.append("[이미지 생성만 실행] 아직 작성된 글이 없어 참고/삽입 없이 이미지만 생성합니다")
+
+        self.image_gen_button.setEnabled(False)
+        self._set_step_status("image_gen", "running")
+        self.log_view.append("[이미지 생성만 실행] 시작")
+
+        work_dir = self.work_dir
+        md_path = self.md_path
+        self.step_worker = StepWorker(lambda: pipeline.run_image_generation(context, work_dir, md_path))
+        self.step_worker.finished_signal.connect(self._on_image_gen_only_finished)
+        self.step_worker.start()
+
+    def _on_image_gen_only_finished(self, result: object) -> None:
+        assert isinstance(result, tuple)
+        status, generated_paths = result
+        self._set_step_status("image_gen", status)
+        self.log_view.append(f"[이미지 생성만 실행] 완료: {status} (생성된 이미지 {len(generated_paths)}장)")
+        self.image_gen_button.setEnabled(True)
+
+    def _resolve_md_path_for_publish(self) -> Path | None:
+        """발행할 md를 찾는다. work_dir 최상위(run_generation의 기본 저장 위치)를 먼저
+        찾고, 없으면 output/ 하위(이전 실행 결과 호환)도 확인한다."""
+        if self.md_path is not None and self.md_path.exists():
+            return self.md_path
+        assert self.work_dir is not None
+        md_files = sorted(self.work_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if md_files:
+            return md_files[0]
+        output_dir_path = config.output_dir(self.work_dir)
+        if not output_dir_path.exists():
+            return None
+        md_files = sorted(output_dir_path.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return md_files[0] if md_files else None
+
+    def _on_publish_only_clicked(self) -> None:
+        if self._step_worker_busy():
+            return
+        context = self._ensure_context()
+        md_path = self._resolve_md_path_for_publish()
+        if md_path is None:
+            self.log_view.append(
+                f"[블로그 발행만 실행] {self.work_dir}(및 output/ 하위)에 발행할 md 파일이 없습니다 — 먼저 AI 글작성을 실행하세요"
+            )
+            return
+
+        assert self.work_dir is not None
+        self.publish_button.setEnabled(False)
+        self._set_step_status("publish", "running")
+        self.log_view.append(f"[블로그 발행만 실행] 시작 (수동 로그인, 임시저장으로 진행): {md_path}")
+
+        work_dir = self.work_dir
+        account_id = context.account_id
+        review_enabled = self.input_tab.review_draft_checkbox.isChecked()
+
+        def publish_after_review():
+            if review_enabled:
+                if not worker.request_review(md_path):
+                    return "canceled", None
+            return pipeline.run_publish(md_path, work_dir, account_id=account_id, cancel_event=worker.cancel_event)
+
+        worker = StepWorker(publish_after_review)
+        self.step_worker = worker
+        worker.review_requested.connect(lambda path: self.review_requested.emit(worker, path))
+        if review_enabled:
+            self._set_step_status("publish", "review")
+        self.step_worker.finished_signal.connect(self._on_publish_only_finished)
+        self.step_worker.start()
+
+    def _on_publish_only_finished(self, result: object) -> None:
+        assert isinstance(result, tuple)
+        status, warning = result
+        self._set_step_status("publish", status)
+        suffix = f" (경고: {warning})" if warning else ""
+        self.log_view.append(f"[블로그 발행만 실행] 완료: {status}{suffix}")
+        self.publish_button.setEnabled(True)
+
+
+class MultiTaskTab(QWidget):
+    """저장된 태스크 관리 + "전체 실행" 대기열 상태를 함께 보여주는 탭.
+
+    두 계층이 함께 있다:
+    1. "저장된 태스크"(TaskManager, tasks.json) — 아직 실행되지 않은, 미리 만들어 둔
+       작업 정의. 여기서 생성/편집/삭제/순서변경하고, "대기열에 추가"를 누르면 그
+       시점의 값을 PipelineContext로 변환해 JobQueueManager에 넘긴다.
+    2. "진행 중/대기 중 작업"(JobQueueManager) — 이미 대기열에 들어가 실행 중이거나
+       실행을 기다리는 작업의 상태. JobQueueManager가 한 번에 하나만 실행하고
+       나머지는 FIFO로 대기시키므로, 이 부분은 그 상태를 그대로 반영해서 보여주기만
+       한다(큐 순서 관리 로직 자체는 JobQueueManager 책임).
+    """
+
+    generation_started = Signal()
+
+    def __init__(
+        self, job_queue: JobQueueManager, task_manager: TaskManager, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.job_queue = job_queue
+        self.task_manager = task_manager
+        # 진행 중 작업의 파이프라인 단계(크롤링/생성/이미지생성/발행) 진행률 계산용 —
+        # job_step 시그널로 완료된(= status != "running") 단계 이름이 들어올 때마다
+        # 채워서 프로그레스바 값을 갱신한다. 작업이 바뀌면 비운다.
+        self._current_job_id: int | None = None
+        self._finished_steps: set[str] = set()
+
+        self.task_list = QListWidget()
+        self.new_task_button = QPushButton("새 태스크")
+        self.new_task_button.clicked.connect(self._on_new_task)
+        self.edit_task_button = QPushButton("편집")
+        self.edit_task_button.clicked.connect(self._on_edit_task)
+        self.delete_task_button = QPushButton("삭제")
+        self.delete_task_button.clicked.connect(self._on_delete_task)
+        self.move_up_button = QPushButton("위로")
+        self.move_up_button.clicked.connect(lambda: self._on_move_task(-1))
+        self.move_down_button = QPushButton("아래로")
+        self.move_down_button.clicked.connect(lambda: self._on_move_task(1))
+        self.enqueue_task_button = QPushButton("대기열에 추가")
+        self.enqueue_task_button.clicked.connect(self._on_enqueue_selected)
+        self.enqueue_all_button = QPushButton("전체 대기열에 추가")
+        self.enqueue_all_button.clicked.connect(self._on_enqueue_all)
+
+        task_button_row = QHBoxLayout()
+        for btn in (
+            self.new_task_button,
+            self.edit_task_button,
+            self.delete_task_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.enqueue_task_button,
+            self.enqueue_all_button,
+        ):
+            task_button_row.addWidget(btn)
+
+        self.current_list = QListWidget()
+        self.current_list.setMaximumHeight(60)
+        self.current_list.itemDoubleClicked.connect(self._on_current_item_double_clicked)
+        self.current_list.currentItemChanged.connect(self._update_cancel_button)
+
+        self.cancel_current_button = QPushButton("진행 중 작업 취소")
+        self.cancel_current_button.clicked.connect(self._on_cancel_current)
+
+        self.current_progress = QProgressBar()
+        self.current_progress.setRange(0, len(RunLogTab.STEP_NAMES))
+        self.current_progress.setValue(0)
+        self.current_progress.setFormat("%v/%m 단계 (%p%)")
+        self.current_progress.setTextVisible(True)
+
+        self.pending_list = QListWidget()
+        # 대기 작업 여러 개를 한 번에 선택해서 일괄 설정을 바꿀 수 있게 한다(사용자 요청).
+        self.pending_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.pending_list.itemDoubleClicked.connect(self._on_pending_item_double_clicked)
+        self.delete_pending_button = QPushButton("선택한 대기 작업 삭제")
+        self.delete_pending_button.clicked.connect(self._on_delete_pending)
+        self.bulk_edit_pending_button = QPushButton("선택 작업 일괄 설정 변경")
+        self.bulk_edit_pending_button.clicked.connect(self._on_bulk_edit_pending)
+        # 대기 중인 작업의 우선순위(실행 순서)를 바꾸는 버튼(사용자 요청) — 저장된
+        # 태스크 목록의 위로/아래로(move_up_button/move_down_button)와 같은 패턴이며,
+        # 여러 개를 선택했을 때는 첫 번째로 선택된 항목만 옮긴다(순서 변경은 한 번에
+        # 하나씩 하는 편이 결과를 예측하기 쉽다).
+        self.move_pending_up_button = QPushButton("위로")
+        self.move_pending_up_button.clicked.connect(lambda: self._on_move_pending(-1))
+        self.move_pending_down_button = QPushButton("아래로")
+        self.move_pending_down_button.clicked.connect(lambda: self._on_move_pending(1))
+        # 앱 시작 시 이전에 남아있던 대기열이 복원되면(JobQueueManager.restore)
+        # 자동으로 실행되지 않고 대기 상태로만 채워지므로, 사용자가 이 버튼을 눌러야
+        # 실행이 시작된다. 진행 중인 작업이 있거나 대기 작업이 없으면 비활성화한다.
+        self.start_pending_button = QPushButton("대기 작업 시작")
+        self.start_pending_button.clicked.connect(self._on_start_pending)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+
+        pending_button_row = QHBoxLayout()
+        pending_button_row.addWidget(self.delete_pending_button)
+        pending_button_row.addWidget(self.bulk_edit_pending_button)
+        pending_button_row.addWidget(self.move_pending_up_button)
+        pending_button_row.addWidget(self.move_pending_down_button)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("저장된 태스크(디스크에 저장됨, 앱 재시작해도 유지)"))
+        layout.addWidget(self.task_list)
+        layout.addLayout(task_button_row)
+        layout.addWidget(QLabel("진행 중 작업 (더블클릭하면 설정 조회)"))
+        layout.addWidget(self.current_list)
+        layout.addWidget(self.cancel_current_button)
+        layout.addWidget(self.current_progress)
+        layout.addWidget(QLabel("대기 중 작업 (더블클릭하면 설정 수정; ‘확인 필요’는 초안 검토, 여러 개 선택 후 일괄 변경 가능)"))
+        layout.addWidget(self.pending_list)
+        layout.addLayout(pending_button_row)
+        layout.addWidget(self.start_pending_button)
+        layout.addWidget(QLabel("진행 로그"))
+        layout.addWidget(self.log_view)
+
+        self.task_manager.changed.connect(self._refresh_tasks)
+        self.job_queue.changed.connect(self._refresh_queue)
+        self.job_queue.job_step.connect(self._on_job_step)
+        self.job_queue.job_done.connect(self._on_job_done)
+        self._refresh_tasks()
+        self._refresh_queue()
+
+    def _refresh_tasks(self) -> None:
+        selected_id = self._selected_task_id()
+        self.task_list.clear()
+        for task in self.task_manager.tasks:
+            settings = []
+            if task.use_crawling:
+                settings.append(f"크롤링 {task.crawl_count}건")
+            if task.generate_images:
+                settings.append(f"AI이미지 {task.image_gen_count}장")
+            if task.agents_md_path:
+                settings.append(f"AGENTS.md: {Path(task.agents_md_path).name}")
+            settings_text = "/".join(settings) if settings else "설정없음"
+            item_text = f"{task.label} — 이미지 {len(task.image_paths)}장, {settings_text}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            self.task_list.addItem(item)
+            if task.task_id == selected_id:
+                self.task_list.setCurrentItem(item)
+
+    def _selected_task_id(self) -> str | None:
+        item = self.task_list.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _selected_task(self) -> TaskItem | None:
+        task_id = self._selected_task_id()
+        if task_id is None:
+            return None
+        return next((t for t in self.task_manager.tasks if t.task_id == task_id), None)
+
+    def _on_new_task(self) -> None:
+        dialog = TaskEditDialog(None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # 생성하기는 단일/일괄 모두 즉시 실행 큐로 보낸다.
+        for task in dialog.get_task_items():
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+        self.generation_started.emit()
+
+    def _on_edit_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 편집] 먼저 목록에서 태스크를 선택하세요")
+            return
+        dialog = TaskEditDialog(task, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task_manager.update(task.task_id, dialog.get_task_item())
+
+    def _on_delete_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 삭제] 먼저 목록에서 태스크를 선택하세요")
+            return
+        self.task_manager.remove(task.task_id)
+
+    def _on_move_task(self, offset: int) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        self.task_manager.move(task.task_id, offset)
+
+    def _on_enqueue_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[대기열에 추가] 먼저 목록에서 태스크를 선택하세요")
+            return
+        job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+        self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+        # 대기열로 넘어간 태스크는 "저장된 태스크" 목록에서 제거한다 — 진행중/대기중으로
+        # 넘어간 뒤에도 저장 목록에 남아 있으면 중복 실행 오인이나 혼동을 일으키기 쉽다.
+        self.task_manager.remove(task.task_id)
+
+    def _on_enqueue_all(self) -> None:
+        if not self.task_manager.tasks:
+            self.log_view.append("[전체 대기열에 추가] 저장된 태스크가 없습니다")
+            return
+        for task in list(self.task_manager.tasks):
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+            self.task_manager.remove(task.task_id)
+
+    def _refresh_queue(self) -> None:
+        selected = self.current_list.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected is not None else None
+        self.current_list.clear()
+        running = self.job_queue.running_jobs()
+        selected_row = 0
+        for row, job in enumerate(running):
+            model_label = config.ai_model_label(job.context.ai_model)
+            account_label = pipeline.account_label(job.context.account_id)
+            item = QListWidgetItem(
+                f"작업 #{job.job_id}: {job.label} ({job.status}) · {model_label} · {account_label}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+            self.current_list.addItem(item)
+            if job.job_id == selected_id:
+                selected_row = row
+        current = self.job_queue.current_job()
+        if current is not None:
+            self.current_list.setCurrentRow(selected_row)
+            if current.job_id != self._current_job_id:
+                # 새 작업이 시작됨 — 이전 작업의 완료 단계 기록을 비우고 0%부터 다시 센다.
+                self._current_job_id = current.job_id
+                self._finished_steps = set()
+                self.current_progress.setValue(0)
+        else:
+            self._current_job_id = None
+            self._finished_steps = set()
+            self.current_progress.setValue(0)
+
+        self._update_cancel_button()
+
+        self.pending_list.clear()
+        pending_jobs = self.job_queue.pending_jobs()
+        for job in pending_jobs:
+            model_label = config.ai_model_label(job.context.ai_model)
+            account_label = pipeline.account_label(job.context.account_id)
+            state = "대기"
+            if self.job_queue.is_review_job(job.job_id):
+                state = job.status
+            elif job.context.resume_work_dir is not None:
+                state = "복원 대기 · 처음부터 재생성"
+            item = QListWidgetItem(f"작업 #{job.job_id}: {job.label} ({state}) · {model_label} · {account_label}")
+            if self.job_queue.is_review_job(job.job_id):
+                item.setBackground(QColor('#fff0b3'))
+                item.setForeground(QColor('#543600'))
+                hint = {
+                    'retry': '진행 중인 작업이 완료되면 기존 초안으로 자동 재시도합니다. 더블클릭하여 직접 검토할 수도 있습니다.',
+                    'editor': '더블클릭하여 이전 작성 탭 확인 안내를 여세요.',
+                    'unknown': '더블클릭하여 네이버 임시저장 목록에서 확인한 결과를 기록하세요.',
+                    'saved': '더블클릭하여 네이버에서 최종 발행하는 방법을 확인하세요.',
+                    'missing': '작업 폴더에 복원 기록이 가리키는 Markdown 파일이 있는지 확인하세요.',
+                }.get(self.job_queue.review_recovery(job.job_id), '더블클릭하여 초안을 검토하세요.')
+                item.setToolTip(job.status if job.status in ('임시저장 중', '취소 중…') else hint)
+            if job.context.resume_work_dir is not None:
+                item.setToolTip(item.toolTip() + f"\n이전 작업 폴더: {job.context.resume_work_dir}")
+            item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+            self.pending_list.addItem(item)
+
+        self.start_pending_button.setEnabled(self.job_queue._current is None and self.job_queue.has_pending_work())
+
+    def _running_job_for_item(self, item: QListWidgetItem | None) -> QueuedJob | None:
+        if item is None:
+            return None
+        job_id = item.data(Qt.ItemDataRole.UserRole)
+        return next((job for job in self.job_queue.running_jobs() if job.job_id == job_id), None)
+
+    def _update_cancel_button(self, *_items) -> None:
+        job = self._running_job_for_item(self.current_list.currentItem())
+        self.cancel_current_button.setEnabled(job is not None and job.status != "취소 중…")
+
+    def _on_current_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """진행 중인 작업은 이미 워커가 시작 시점 context를 캡처해 실행 중이라 수정해도
+        반영되지 않으므로(update_pending 참조), 설정을 조회만 할 수 있게 한다."""
+        current = self._running_job_for_item(item)
+        if current is None:
+            return
+        QMessageBox.information(self, f"작업 #{current.job_id} 정보 (진행 중 — 조회만 가능)", _job_info_text(current))
+
+    def _on_pending_item_double_clicked(self, item: QListWidgetItem) -> None:
+        job_id = item.data(Qt.ItemDataRole.UserRole)
+        if self.job_queue.is_review_job(job_id):
+            state = self.job_queue.review_recovery(job_id)
+            if state == 'saved':
+                QMessageBox.information(self, '네이버에서 발행 대기',
+                                        '네이버 블로그 글쓰기 화면의 임시저장 목록에서 해당 글을 열어 발행하세요.')
+            elif state == 'unknown':
+                self._confirm_save_status(job_id)
+            elif state == 'missing':
+                QMessageBox.warning(self, '초안 파일 확인 필요',
+                                    '복원 기록에 지정된 Markdown을 작업 폴더에서 찾지 못했습니다. 파일을 복구한 뒤 앱을 다시 시작하세요.')
+            elif state == 'editor':
+                dialog = QMessageBox(QMessageBox.Icon.Information, '이전 작성 탭 확인',
+                    'Chrome에 작성 중인 글이 남아 있으면 그 탭에서 이어서 작성하세요. '
+                    '이전 탭을 확인했고 기존 Markdown 초안으로 다시 진행하려면 아래 버튼을 누르세요.',
+                    parent=self)
+                open_draft = dialog.addButton('기존 초안 열기', QMessageBox.ButtonRole.ActionRole)
+                dialog.addButton(QMessageBox.StandardButton.Close)
+                dialog.exec()
+                if dialog.clickedButton() is open_draft:
+                    self.job_queue.open_review(job_id, editor_checked=True)
+            else:
+                self.job_queue.open_review(job_id)
+            return
+        job = next((j for j in self.job_queue.pending_jobs() if j.job_id == job_id), None)
+        if job is None:
+            self.log_view.append(f"[작업 편집] 작업 #{job_id}을(를) 찾을 수 없습니다(이미 시작됐을 수 있음)")
+            return
+        dialog_class = StyleTaskEditDialog if job.context.workflow_kind == "style" else TaskEditDialog
+        dialog = dialog_class(_job_to_task_item(job), self)
+        dialog.setWindowTitle(f"작업 #{job_id} 편집")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dialog.get_task_item()
+        updated.connect_affiliate_links = pipeline.present_connect_affiliate_links(
+            updated.comment, job.context.connect_affiliate_links
+        )
+        if self.job_queue.update_pending(job_id, updated.to_pipeline_context(), updated.label):
+            self.log_view.append(f"[작업 편집] 작업 #{job_id} 설정이 변경되었습니다")
+
+    def _confirm_save_status(self, job_id: int) -> None:
+        dialog = QMessageBox(QMessageBox.Icon.Warning, '저장 여부 확인 필요',
+            '네이버 임시저장 목록과 작성 탭에서 해당 글을 확인한 뒤, 실제 저장 여부를 선택하세요.',
+            parent=self)
+        saved_button = dialog.addButton('네이버에 저장됨', QMessageBox.ButtonRole.ActionRole)
+        retry_button = dialog.addButton('저장되지 않음', QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        selected = dialog.clickedButton()
+        if selected not in (saved_button, retry_button):
+            return
+        try:
+            saved = selected is saved_button
+            if self.job_queue.resolve_save_status(job_id, saved=saved) and not saved:
+                self.job_queue.open_review(job_id)
+        except OSError:
+            logger.exception('네이버 임시저장 확인 결과를 기록하지 못했습니다.')
+            QMessageBox.warning(self, '저장 여부 확인', '확인 결과를 기록하지 못했습니다. 대기열에서 다시 확인하세요.')
+
+    def _on_cancel_current(self) -> None:
+        """진행 중인 작업을 취소한다(사용자 요청: 진행 중인 작업 삭제 기능).
+
+        실제로 서브프로세스가 죽고 워커가 끝나기까지 약간의 지연(늦어도 1초 이내)이
+        있을 수 있으므로, 목록에는 바로 사라지지 않고 "취소 중…"으로 표시된 뒤
+        _on_job_done에서 최종적으로 "취소됨"으로 반영된다.
+        """
+        current = self._running_job_for_item(self.current_list.currentItem())
+        if current is None:
+            self.log_view.append("[작업 취소] 진행 중인 작업이 없습니다")
+            return
+        reply = QMessageBox.question(
+            self, "진행 중 작업 취소", f"작업 #{current.job_id}: {current.label}을(를) 취소할까요?"
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self.job_queue.cancel_current(current.job_id):
+            self.log_view.append(f"[작업 취소] 작업 #{current.job_id} 취소 요청됨 — 잠시 후 중단됩니다")
+
+    def _on_move_pending(self, offset: int) -> None:
+        """선택한 대기 작업(들)의 순서를 offset만큼 옮긴다.
+
+        여러 개를 선택했으면(시프트/컨트롤 클릭) 한 덩어리로 함께 옮긴다(사용자 요청:
+        멀티 선택 이동).
+        """
+        items = self.pending_list.selectedItems()
+        if not items:
+            self.log_view.append("[대기 작업 순서 변경] 먼저 목록에서 옮길 대기 작업을 선택하세요")
+            return
+        job_ids = {item.data(Qt.ItemDataRole.UserRole) for item in items}
+        if not self.job_queue.move_pending_bulk(job_ids, offset):
+            return
+        # 순서가 바뀐 뒤에도 방금 옮긴 항목들이 계속 선택된 상태를 유지해, 여러 번 눌러
+        # 연속으로 옮길 수 있게 한다(TaskManager의 위로/아래로와 같은 사용자 경험).
+        for i in range(self.pending_list.count()):
+            if self.pending_list.item(i).data(Qt.ItemDataRole.UserRole) in job_ids:
+                self.pending_list.item(i).setSelected(True)
+
+    def _on_delete_pending(self) -> None:
+        """선택한 대기 작업(들)을 대기열에서 지운다(사용자 요청: 멀티 선택 삭제)."""
+        items = self.pending_list.selectedItems()
+        if not items:
+            self.log_view.append("[대기 작업 삭제] 먼저 목록에서 삭제할 대기 작업을 선택하세요")
+            return
+        job_ids = {item.data(Qt.ItemDataRole.UserRole) for item in items}
+        removed = self.job_queue.remove_pending_bulk(job_ids)
+        if removed:
+            self.log_view.append(f"[대기 작업 삭제] {removed}개 작업이 대기열에서 삭제됨")
+        else:
+            self.log_view.append("[대기 작업 삭제] 선택한 작업을 찾을 수 없습니다(이미 시작됐을 수 있음)")
+
+    def _on_bulk_edit_pending(self) -> None:
+        """대기열에서 다중 선택한 작업들의 공통 설정을 한 번에 바꾼다(사용자 요청).
+
+        키워드/코멘트/이미지 목록처럼 작업마다 다른 값은 각 작업에 저장된 값을 그대로
+        두고, 크롤링/AI 모델/이미지 생성·검색/AGENTS.md/로그인 모드만 일괄 적용한다.
+        """
+        items = self.pending_list.selectedItems()
+        if not items:
+            self.log_view.append("[일괄 설정 변경] 먼저 목록에서 대기 작업을 선택하세요(여러 개 선택 가능)")
+            return
+        job_ids = {item.data(Qt.ItemDataRole.UserRole) for item in items}
+        jobs = [j for j in self.job_queue.pending_jobs() if j.job_id in job_ids]
+        if not jobs:
+            return
+
+        if any(self.job_queue.is_review_job(job.job_id) for job in jobs):
+            self.log_view.append("[일괄 설정 변경] 확인 대기 중인 초안은 더블클릭하여 검토해 주세요.")
+            return
+
+        if any(job.context.workflow_kind == "style" for job in jobs):
+            self.log_view.append("[일괄 설정 변경] 스타일 작업은 개별 편집해 주세요")
+            return
+
+        dialog = BulkQueueEditDialog(jobs[0].context, len(jobs), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated_count = 0
+        for job in jobs:
+            new_context = dialog.apply_to(job.context)
+            if self.job_queue.update_pending(job.job_id, new_context, job.label):
+                updated_count += 1
+        self.log_view.append(f"[일괄 설정 변경] {updated_count}개 작업의 설정이 변경되었습니다")
+
+    def _on_start_pending(self) -> None:
+        if not self.job_queue.has_pending_work():
+            self.log_view.append("[대기 작업 시작] 대기 중인 작업이 없습니다")
+            return
+        self.job_queue.start_pending()
+        self.log_view.append("[대기 작업 시작] 대기열 실행을 시작했습니다")
+
+    def _on_job_step(self, job_id: int, name: str, status: str) -> None:
+        label = RunLogTab.STEP_LABELS.get(name, name)
+        self.log_view.append(f"[작업 #{job_id}] {label}: {status}")
+
+        # status가 "running"이면 그 단계가 아직 진행 중이라는 뜻이라 진행률에 반영하지
+        # 않고, 단계가 끝난(success/failed/skipped/reused) 시점에만 완료로 센다.
+        if job_id == self._current_job_id and status not in {"running", "review"}:
+            self._finished_steps.add(name)
+            self.current_progress.setValue(len(self._finished_steps))
+
+    def _on_job_done(self, job_id: int, result: dict) -> None:
+        failed = any(step.get("status") == "failed" for step in result.get("steps", {}).values())
+        canceled = any(step.get("status") == "canceled" for step in result.get("steps", {}).values())
+        outcome = "취소됨" if canceled else ("실패" if failed else ("수동 발행 대기" if any(step.get("status") == "manual_ready" for step in result.get("steps", {}).values()) else "완료"))
+        self.log_view.append(f"[작업 #{job_id}] {outcome}")
+        if failed:
+            for step in result.get("steps", {}).values():
+                if step.get("status") == "failed" and step.get("error"):
+                    self.log_view.append(f"[작업 #{job_id}] {step['error']}")
+
+
+class StyleTaskManager(TaskManager):
+    def __init__(self, parent: QObject | None = None) -> None:
+        QObject.__init__(self, parent)
+        from style_multitask.storage import load_style_tasks
+        self.tasks = load_style_tasks()
+
+    def _persist(self) -> None:
+        from style_multitask.storage import save_style_tasks
+        save_style_tasks(self.tasks)
+        self.changed.emit()
+
+
+class StyleMultiTaskTab(MultiTaskTab):
+    def __init__(
+        self, job_queue: JobQueueManager, task_manager: TaskManager, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(job_queue, task_manager, parent)
+        self.new_task_button.setText("새 스타일 분석 작업")
+        hint = QLabel("첫 검색 글 분석 → 작성 지침 자동 생성 → 글·이미지 작성\n이미지 수와 AGENTS.md는 직접 설정할 필요가 없습니다.")
+        hint.setWordWrap(True)
+        self.layout().insertWidget(0, hint)
+
+    def _on_new_task(self) -> None:
+        dialog = StyleTaskEditDialog(None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dialog.bulk_mode_checkbox.isChecked():
+            self.task_manager.add(dialog.get_task_item())
+            return
+        for task in dialog.get_task_items():
+            job = self.job_queue.enqueue(task.to_pipeline_context(), task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+
+    def _on_edit_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[태스크 편집] 먼저 목록에서 태스크를 선택하세요")
+            return
+        dialog = StyleTaskEditDialog(task, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task_manager.update(task.task_id, dialog.get_task_item())
+
+    def _on_enqueue_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            self.log_view.append("[대기열에 추가] 먼저 목록에서 태스크를 선택하세요")
+            return
+        try:
+            context = task.to_pipeline_context()
+        except ValueError as exc:
+            self.log_view.append(f"[대기열에 추가 실패] {exc}")
+            return
+        job = self.job_queue.enqueue(context, task.label)
+        self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+        self.task_manager.remove(task.task_id)
+
+    def _on_enqueue_all(self) -> None:
+        if not self.task_manager.tasks:
+            self.log_view.append("[전체 대기열에 추가] 저장된 태스크가 없습니다")
+            return
+        for task in list(self.task_manager.tasks):
+            try:
+                context = task.to_pipeline_context()
+            except ValueError as exc:
+                self.log_view.append(f"[대기열에 추가 실패] {task.label}: {exc}")
+                continue
+            job = self.job_queue.enqueue(context, task.label)
+            self.log_view.append(f"[대기열에 추가] {task.label} (작업 #{job.job_id})")
+            self.task_manager.remove(task.task_id)
+
+    def _refresh_tasks(self) -> None:
+        selected_id = self._selected_task_id()
+        self.task_list.clear()
+        for task in self.task_manager.tasks:
+            item = QListWidgetItem(f"{task.label} — 크롤링 {task.crawl_count}건, 이미지 수 자동 분석")
+            item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            self.task_list.addItem(item)
+            if task.task_id == selected_id:
+                self.task_list.setCurrentItem(item)
+
+
+class ResultTab(QWidget):
+    """PostResult 하위 작업 폴더 목록과 result.json 요약을 표시하는 결과 탭."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.refresh_button = QPushButton("새로고침")
+        self.refresh_button.clicked.connect(self.refresh)
+
+        self.folder_list = QListWidget()
+        self.folder_list.currentTextChanged.connect(self._on_folder_selected)
+
+        self.summary_view = QTextEdit()
+        self.summary_view.setReadOnly(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.refresh_button)
+        layout.addWidget(self.folder_list)
+        layout.addWidget(self.summary_view)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.folder_list.clear()
+        root = config.POST_RESULT_ROOT
+        if not root.exists():
+            return
+        for entry in sorted(p for p in root.iterdir() if p.is_dir()):
+            self.folder_list.addItem(entry.name)
+
+    def _on_folder_selected(self, folder_name: str) -> None:
+        if not folder_name:
+            self.summary_view.clear()
+            return
+        result_json_path = config.POST_RESULT_ROOT / folder_name / "result.json"
+        if result_json_path.exists():
+            data = json.loads(result_json_path.read_text(encoding="utf-8"))
+            self.summary_view.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            self.summary_view.setPlainText("result.json 없음")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("네이버 블로그 자동 작성 오케스트레이터")
+        self.setWindowIcon(build_app_icon())
+
+        self.job_queue = JobQueueManager(self)
+        self.task_manager = TaskManager(self)
+        self.style_task_manager = StyleTaskManager(self)
+
+        self.input_tab = InputTab()
+        self.agents_editor_tab = AgentsEditorTab()
+        self.agents_editor_tab.file_created.connect(
+            lambda: _populate_agents_md_combo(
+                self.input_tab.agents_md_combo, self.input_tab.agents_md_path
+            )
+        )
+        self.run_log_tab = RunLogTab(self.input_tab, self.job_queue)
+        self.multi_task_tab = MultiTaskTab(self.job_queue, self.task_manager)
+        self.style_multi_task_tab = StyleMultiTaskTab(self.job_queue, self.style_task_manager)
+        self.result_tab = ResultTab()
+
+        # RunLogTab/MultiTaskTab이 job_queue 시그널에 다 연결된 뒤에 복원해야 대기열
+        # 상태가 UI에 정상 반영된다(먹통으로 강제 종료 등으로 남아있던 대기 중 작업을
+        # 이어서 진행 — queue_state.json, JobQueueManager.restore 참조).
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.input_tab, "입력")
+        self.tabs.addTab(self.agents_editor_tab, "AGENTS.md 편집")
+        self.tabs.addTab(self.run_log_tab, "실행·로그")
+        self.tabs.addTab(self.result_tab, "결과")
+        self.tabs.addTab(self.style_multi_task_tab, "스타일 분석 멀티작업")
+        self.draft_review_tab = DraftReviewTab()
+        self.tabs.addTab(self.draft_review_tab, "초안 검토")
+        self.job_queue.review_requested.connect(self._offer_draft_review)
+        self.job_queue.review_selected.connect(self._open_draft_review)
+        self.draft_review_tab.review_approved.connect(self.job_queue.mark_review_approved)
+        self.run_log_tab.review_requested.connect(self._open_draft_review)
+
+        self.log_panel = LogPanel()
+        self._summary_job_id = None
+        self.job_queue.changed.connect(self._sync_summary_job)
+        self.run_log_tab.progress_changed.connect(self._update_summary_step)
+        self.job_queue.job_done.connect(self._finish_summary_job)
+        self._log_handler = QtLogHandler(self.log_panel.log_signal, self.log_panel.codex_auth_error)
+        self._log_handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(self._log_handler)
+        self._last_codex_auth_warning = 0.0
+        self.log_panel.codex_auth_error.connect(self._on_codex_auth_error)
+        self.job_queue.restore()
+
+        # 창이 닫히거나(closeEvent) 테스트에서 위젯이 조기 파괴되는 경우(qtbot) 모두 대비해
+        # root logger에서 핸들러를 제거한다 — 남겨두면 LogPanel의 Qt 오브젝트가 사라진 뒤
+        # 다른 로그 호출에서 "Signal source has been deleted" 오류가 난다.
+        handler = self._log_handler
+        self.destroyed.connect(lambda: logging.getLogger().removeHandler(handler))
+
+        # 탭 안의 버튼 행(예: 멀티 작업 탭의 7개 버튼, 실행·로그 탭의 6개 버튼)이 요구하는
+        # 자연스러운 너비가 QTabWidget의 minimumSizeHint로 그대로 전달되면, QSplitter가
+        # 그보다 좁게는 점진적으로 줄이지 못하고(수동으로 신고된 문제: "왼쪽창을 줄이는데
+        # 제한이 있어") 갑자기 완전히 접히는 것처럼 동작한다. 가로 sizePolicy를 Ignored로
+        # 바꾸면 QSplitter가 이 위젯의 minimumSizeHint를 폭 계산에 반영하지 않아 자유롭게
+        # 줄일 수 있다(Qt의 qSmartMinSize가 Ignored 정책일 때 minimumSizeHint를 건너뜀).
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Ignored, self.tabs.sizePolicy().verticalPolicy())
+
+        self.basic_page = self.tabs
+        self.multi_task_tab.setSizePolicy(QSizePolicy.Policy.Ignored, self.multi_task_tab.sizePolicy().verticalPolicy())
+        self.progress_page = QSplitter(Qt.Orientation.Horizontal)
+        self.progress_page.addWidget(self.multi_task_tab)
+        self.progress_page.addWidget(self.log_panel)
+        self.progress_page.setSizes([700, 400])
+        self.progress_page.setChildrenCollapsible(True)
+        self.shopping_pages = shopping_ui.ShoppingPages(
+            self.job_queue.enqueue, _populate_account_combo, _open_account_manager, _populate_agents_md_combo
+        )
+        self.navigation = QTreeWidget()
+        self.navigation.setHeaderHidden(True)
+        self.navigation.setMinimumWidth(180)
+        basic = QTreeWidgetItem(self.navigation, ["기본 글쓰기"])
+        general_writing = QTreeWidgetItem(basic, ["일반 글쓰기"])
+        task_progress = QTreeWidgetItem(basic, ["작업 진행 현황"])
+        self.multi_task_tab.generation_started.connect(
+            lambda: self.navigation.setCurrentItem(task_progress)
+        )
+        monetization = QTreeWidgetItem(self.navigation, ["수익화 글쓰기"])
+        shopping = QTreeWidgetItem(monetization, ["네이버 커넥트"])
+        settings = QTreeWidgetItem(self.navigation, ["설정"])
+        self.navigation.expandAll()
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.basic_page)
+        self.pages.addWidget(self.shopping_pages.page)
+        self.pages.addWidget(self.shopping_pages.settings_page)
+        self.pages.addWidget(self.progress_page)
+
+        def navigate(item, _previous):
+            page = (self.shopping_pages.page if item in (monetization, shopping)
+                    else self.shopping_pages.settings_page if item is settings
+                    else self.progress_page if item is task_progress
+                    else self.basic_page)
+            self.pages.setCurrentWidget(page)
+
+        def activate(item, _column):
+            if item is general_writing:
+                self.multi_task_tab._on_new_task()
+
+        self.navigation.currentItemChanged.connect(navigate)
+        self.navigation.itemClicked.connect(activate)
+        self.navigation.setCurrentItem(basic)
+        outer = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(self.navigation)
+        outer.addWidget(self.pages)
+        outer.setSizes([200, 1100])
+        outer.setChildrenCollapsible(False)
+        self.setCentralWidget(outer)
+
+        logger.info("MainWindow 초기화 완료: %d개 탭 생성", self.tabs.count())
+
+    def _sync_summary_job(self) -> None:
+        job = self.job_queue.current_job()
+        if job is not None and job.job_id != self._summary_job_id:
+            self._summary_job_id = job.job_id
+            self.log_panel.start_progress(f"작업 #{job.job_id} · {job.label}", RunLogTab.STEP_NAMES)
+
+    def _finish_summary_job(self, job_id: int, result: dict) -> None:
+        if self._summary_job_id == job_id:
+            self.log_panel.finish_progress(result)
+
+    def _offer_draft_review(self, worker, path) -> None:
+        if self.draft_review_tab.worker is None and not self.draft_review_tab._publishing:
+            self._open_draft_review(worker, path)
+
+    def _open_draft_review(self, worker, path) -> None:
+        if worker.cancel_event.is_set():
+            worker.resolve_review(False)
+            return
+        if self.draft_review_tab.worker is not None and self.draft_review_tab.worker is not worker:
+            if not self.draft_review_tab.save_pending_edits():
+                return
+        self.draft_review_tab.open_draft(worker, path)
+        if getattr(worker, 'context', None) is not None and worker.context.resume_work_dir is not None:
+            has_unsaved_recovery = self.draft_review_tab.text_edit.toPlainText() != self.draft_review_tab._saved_content
+            self.draft_review_tab.status_label.setText(
+                ("저장 전 편집 복구 · " if has_unsaved_recovery else "복원된 초안 · ")
+                + "현재 초안을 검토한 뒤 네이버 임시저장만 이어서 진행할 수 있습니다."
+            )
+        worker.finished_signal.connect(lambda _result, w=worker: self.draft_review_tab.finish_worker(w))
+        self.pages.setCurrentWidget(self.basic_page)
+        self.navigation.setCurrentItem(self.navigation.topLevelItem(0))
+        self.tabs.setCurrentWidget(self.draft_review_tab)
+
+    def _finish_draft_review(self, _job_id, _result) -> None:
+        if self.draft_review_tab.worker:
+            self.draft_review_tab.end_review()
+
+    def _update_summary_step(self, name: str, status: str) -> None:
+        job = self.job_queue.current_job()
+        if job and job.status == "검토 대기" and status == "running":
+            job.status = "진행중"
+            self.job_queue.changed.emit()
+        if self.job_queue.current_job() is None:
+            if status == "running":
+                self.log_panel.start_progress("단계별 실행", (name,))
+            self.log_panel.update_progress(name, status)
+            if status not in {"running", "review"}:
+                self.log_panel.finish_progress({"steps": {name: {"status": status}}})
+                if self.draft_review_tab.worker:
+                    self.draft_review_tab.end_review()
+        else:
+            self.log_panel.update_progress(name, status)
+
+    def closeEvent(self, event) -> None:
+        """창을 닫기 전에 백그라운드 QThread(전체 실행 파이프라인/단독 단계 실행/로그인)가
+        실행 중인지 확인한다.
+
+        이전에는 실행 중인 워커가 있어도 그냥 닫혀 버렸는데, 그러면 파이썬 인터프리터
+        종료 과정에서 아직 끝나지 않은 QThread에 대한 마지막 참조(self.job_queue._worker,
+        run_log_tab.step_worker, input_tab._prelogin_worker)가 사라지면서 "QThread:
+        Destroyed while thread is still running" 경고와 함께 앱이 죽는 문제가
+        _on_worker_finished와 같은 원인으로 재현됐다. 실행 중인 작업이 있으면 사용자에게
+        확인을 받고, 닫기로 하면 취소 신호를 보낸 뒤 각 워커가 실제로 끝날 때까지
+        wait()로 기다렸다가 닫는다.
+        """
+        running_workers: list[QThread] = []
+        running_workers.extend(self.job_queue.active_workers())
+        step_worker = self.run_log_tab.step_worker
+        if step_worker is not None and step_worker.isRunning():
+            running_workers.append(step_worker)
+        prelogin_worker = self.input_tab.prelogin_worker()
+        if prelogin_worker is not None and prelogin_worker.isRunning():
+            running_workers.append(prelogin_worker)
+
+        shopping_worker = self.shopping_pages.active_worker()
+        if shopping_worker is not None:
+            running_workers.append(shopping_worker)
+
+        if running_workers:
+            reply = QMessageBox.question(
+                self,
+                "실행 중인 작업이 있습니다",
+                "아직 끝나지 않은 작업(전체 실행/단계 실행/로그인)이 있습니다.\n"
+                "종료하면 진행 중인 작업을 중단하고 대기열에 보존합니다.\n"
+                "다시 실행할 때 작업 진행 현황에서 이어서 시작할 수 있습니다. 닫으시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            if not self.draft_review_tab.save_pending_edits():
+                event.ignore()
+                return
+            self.job_queue._shutting_down = True
+            self.job_queue.cancel_current()
+            self.job_queue.cancel_review_workers()
+            self.shopping_pages.cancel()
+            if step_worker is not None:
+                step_worker.cancel_event.set()
+            if prelogin_worker is not None:
+                prelogin_worker.cancel_event.set()
+            for worker in running_workers:
+                worker.wait()
+            self.job_queue._persist()
+        elif not self.draft_review_tab.save_pending_edits():
+            event.ignore()
+            return
+
+        logging.getLogger().removeHandler(self._log_handler)
+        super().closeEvent(event)
+
+    def _on_codex_auth_error(self, message: str) -> None:
+        # codex exec 로그인 세션(refresh token) 만료 시 실패 원인이 로그에 묻혀 알아채기
+        # 어렵다는 사용자 리포트로 추가. 한 번의 실패마다 동일 문구가 여러 줄 쏟아지므로
+        # 30초 쿨다운으로 팝업이 연달아 뜨는 것을 막는다.
+        now = time.monotonic()
+        if now - self._last_codex_auth_warning < 30:
+            return
+        self._last_codex_auth_warning = now
+        QMessageBox.warning(
+            self,
+            "codex 로그인 필요",
+            "codex CLI 로그인 세션이 만료되어 글 생성이 실패했습니다.\n\n"
+            f"오류 내용: {message}\n\n"
+            "터미널에서 아래 명령으로 재로그인한 뒤 작업을 다시 실행해주세요.\n\n"
+            "    codex logout\n    codex login",
+        )
+
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--write-icon":
+        # QPainter/QPixmap 렌더링에 QApplication이 필요하다.
+        _app = QApplication(sys.argv)
+        out = Path(sys.argv[2]) if len(sys.argv) >= 3 else Path(__file__).resolve().parent / "app.ico"
+        save_app_icon_ico(out)
+        print(f"아이콘 저장: {out}")
+        return 0
+
+    if sys.platform == "win32":
+        # python.exe의 AppUserModelID로 묶이면 작업표시줄이 우리 QIcon 대신
+        # 파이콘 기본 아이콘을 보여준다. 이 앱만의 고유 ID를 등록해 분리한다.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "crawl_autowrite.orchestrator.gui.1"
+        )
+    app = QApplication(sys.argv)
+    app_icon = build_app_icon()
+    app.setWindowIcon(app_icon)
+    app.setApplicationName("crawl_autowrite")
+    app.setApplicationDisplayName("네이버 블로그 자동 작성 오케스트레이터")
+    window = MainWindow()
+    window.show()
+    if sys.platform == "win32":
+        _setup_windows_taskbar(window, app_icon)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
